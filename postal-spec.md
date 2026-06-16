@@ -101,10 +101,32 @@ una persona. El gate corre en **dos** sitios:
 
 ## 5. Gobernanza (quórum) — `members.json`
 
-Cambios sensibles (subir a alguien a `owner`/`admin`, rotar una clave, expulsar) son
-eventos `kind:"member"` que requieren **K atestaciones** (firmas ECDSA de owners/admins
-existentes). El gate cuenta firmas válidas: política blanda, *enforcement* duro. (v1
-implementa firma+verify de eventos; el conteo de quórum es §7 roadmap.)
+Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove` |
+`set_role`, que requieren **K atestaciones** (firmas ECDSA de owners/admins
+existentes). El gate cuenta **aprobadores distintos autorizados** = el proponente (si
+es owner/admin) más cada `attestation.by` cuya firma valida sobre el payload canónico.
+Política por defecto: `{ add: 1, remove: 2, set_role: 2 }`, sobreescribible en
+`meta.json.governance`. **Implementado y probado** (`test/governance.test.mjs`, 9/9):
+
+- una sola aprobación es rechazada para `set_role` (`insufficient-quorum`);
+- proponente + atestación de admin lo aprueba;
+- una atestación de un id **no autorizado** no cuenta;
+- una atestación **con la clave equivocada** no cuenta;
+- `op` desconocido se rechaza.
+
+El proponente y todos los atestadores firman el mismo **payload canónico** (`signedView`:
+el evento sin `sig` ni `attestations`), así añadir atestaciones nunca invalida la firma
+del autor.
+
+```json
+{
+  "v": 1, "kind": "member", "chat_id": "c1",
+  "from": "<proponente>", "to": [], "created_at": "...", "id": "..._...",
+  "body": { "op": "set_role", "target": "<id>", "role": "admin" },
+  "attestations": [ { "by": "<admin id>", "sig": "<ECDSA sobre signedView>" } ],
+  "sig": "<firma del proponente sobre signedView>"
+}
+```
 
 ## 6. Alcance honesto (qué Postal **no** hace)
 
@@ -117,10 +139,11 @@ implementa firma+verify de eventos; el conteo de quórum es §7 roadmap.)
 
 ## 7. Roadmap
 
-- Conteo de quórum y rotación de claves en el gate.
-- Firma de `members.json`/`meta.json` (hoy especificado, no enforced en la referencia).
-- GitHub Action de ejemplo (`postal verify`) como required check.
-- Transporte (lectura/escritura de `.postal/` vía API de host git).
+- **Replay de membresía**: el gate hoy verifica eventos `member` contra el snapshot
+  `members.json`; falta reconstruir la membresía desde el génesis (creador = owner) y
+  aplicar `applyMemberEvent` en orden, para validar cadenas de cambios sin snapshot.
+- **Rotación de clave de identidad** (`users/<id>.json`) firmada por la clave anterior.
+- Firma de `members.json`/`meta.json` (hoy `governance` se lee pero el doc no va firmado).
 - Reducción de metadatos (ids opacos, padding) — investigación.
 
 ## 8. Implementación de referencia

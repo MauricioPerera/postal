@@ -94,7 +94,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
   }
 
   const priv = await importSignPrivate(identity.sign.privateJwk);
-  ev.sig = await sign(priv, canonical(stripSig(ev)));
+  ev.sig = await sign(priv, canonical(signedView(ev)));
   return ev;
 }
 
@@ -103,7 +103,10 @@ async function sealEnvelope(text, recipients, aad) {
   return btoa(unescape(encodeURIComponent(JSON.stringify(sealed))));
 }
 
-const stripSig = (ev) => { const { sig, ...rest } = ev; return rest; };
+// The canonical signed payload: everything EXCEPT the signature and the
+// attestations. Both the author's `sig` and each attestor's signature cover this,
+// so adding attestations never invalidates the author's signature.
+const signedView = (ev) => { const { sig, attestations, ...rest } = ev; return rest; };
 
 // Open a message event as `identity` (decrypt the sealed body).
 export async function openMessage(ev, identity) {
@@ -115,11 +118,72 @@ export async function openMessage(ev, identity) {
   return openSealed(sealed, identity.id, identity.enc.privateJwk, aad);
 }
 
+// --- governance (HARD: quorum of attestations) -------------------------------
+
+// Default quorum per membership op: how many distinct authorized approvers are
+// required. A chat can override this in meta.json `governance`.
+export const DEFAULT_GOVERNANCE = { add: 1, remove: 2, set_role: 2 };
+const AUTHORIZED_ROLES = new Set(["owner", "admin"]);
+
+// Build a membership-change event attested by a quorum.
+//   proposer  : identity proposing the change (counts as one approver if authorized)
+//   change    : { op:"add"|"remove"|"set_role", target, role? }
+//   attestors : [identity] of other authorized members who co-sign
+export async function buildMemberEvent(proposer, { chat_id, created_at, rnd, op, target, role }, attestors = []) {
+  const ev = {
+    v: VERSION, kind: "member", chat_id, from: proposer.id, to: [],
+    created_at, id: makeEventId(created_at, proposer.id, rnd),
+    body: { op, target, ...(role ? { role } : {}) },
+  };
+  const payload = canonical(signedView(ev));
+  ev.attestations = [];
+  for (const a of attestors) {
+    ev.attestations.push({ by: a.id, sig: await sign(await importSignPrivate(a.sign.privateJwk), payload) });
+  }
+  ev.sig = await sign(await importSignPrivate(proposer.sign.privateJwk), payload);
+  return ev;
+}
+
+// Evolve a membership array by applying a (already-verified) member event.
+export function applyMemberEvent(members, ev) {
+  const list = (members || []).map((m) => ({ ...m }));
+  const b = ev.body || {};
+  if (b.op === "add" && !list.some((m) => m.id === b.target)) {
+    list.push({ id: b.target, role: b.role || "member" });
+  } else if (b.op === "remove") {
+    return list.filter((m) => m.id !== b.target);
+  } else if (b.op === "set_role") {
+    const m = list.find((x) => x.id === b.target);
+    if (m) m.role = b.role || m.role;
+  }
+  return list;
+}
+
+// Count distinct authorized approvers of a member event (proposer + attestations).
+async function countApprovers(ev, directory, members) {
+  const authorized = new Set((members || []).filter((m) => AUTHORIZED_ROLES.has(m.role)).map((m) => m.id));
+  const payload = canonical(signedView(ev));
+  const approvers = new Set();
+
+  // proposer counts if authorized (their main sig already verified upstream)
+  if (authorized.has(ev.from)) approvers.add(ev.from);
+
+  for (const att of ev.attestations || []) {
+    if (!att || !att.by || !att.sig || approvers.has(att.by) || !authorized.has(att.by)) continue;
+    const doc = directory && directory[att.by];
+    if (!doc) continue;
+    const pub = await importSignPublic(doc.sign_key.pub);
+    if (await verify(pub, att.sig, payload)) approvers.add(att.by);
+  }
+  return approvers.size;
+}
+
 // --- the deterministic gate (HARD) -------------------------------------------
 // Returns { ok, reasons:[...] }. A reason present = the event is rejected.
 // `directory` maps id -> verified public identity doc. `seenPaths` enforces
-// append-only (no overwrite). `members` is the chat membership for authorization.
-export async function verifyEvent(ev, { directory, seenPaths, members } = {}) {
+// append-only. `members` is the chat membership for authorization. `governance`
+// overrides the default quorum policy for member events.
+export async function verifyEvent(ev, { directory, seenPaths, members, governance } = {}) {
   const reasons = [];
   const R = (c, m) => { if (c) reasons.push(m); };
 
@@ -142,7 +206,7 @@ export async function verifyEvent(ev, { directory, seenPaths, members } = {}) {
     reasons.push("unknown-author");
   } else {
     const pub = await importSignPublic(author.sign_key.pub);
-    const good = await verify(pub, ev.sig, canonical(stripSig(ev)));
+    const good = await verify(pub, ev.sig, canonical(signedView(ev)));
     R(!good, "invalid-signature");
   }
 
@@ -151,7 +215,20 @@ export async function verifyEvent(ev, { directory, seenPaths, members } = {}) {
     R(!members.some((m) => m.id === ev.from), "author-not-member");
   }
 
-  // 5. append-only: this path must not already exist
+  // 5. governance: membership changes need a quorum of authorized approvers
+  if (ev.kind === "member") {
+    const op = ev.body && ev.body.op;
+    const policy = Object.assign({}, DEFAULT_GOVERNANCE, governance || {});
+    if (!op || !(op in policy)) {
+      reasons.push("unknown-member-op");
+    } else if (members) {
+      const need = policy[op];
+      const have = await countApprovers(ev, directory, members);
+      R(have < need, `insufficient-quorum(${have}/${need})`);
+    }
+  }
+
+  // 6. append-only: this path must not already exist
   if (seenPaths) {
     R(seenPaths.has(eventPath(ev.chat_id, ev)), "overwrites-existing");
   }

@@ -49,6 +49,8 @@ export async function verifyRepo(repoRoot) {
   for (const chat of chats) {
     const membersDoc = readJson(join(chatsDir, chat, "members.json"));
     const members = membersDoc && Array.isArray(membersDoc.members) ? membersDoc.members : null;
+    const meta = readJson(join(chatsDir, chat, "meta.json"));
+    const governance = meta && meta.governance ? meta.governance : undefined;
     const seenPaths = new Set();
 
     for (const path of walk(join(chatsDir, chat, "events")).sort()) {
@@ -56,7 +58,7 @@ export async function verifyRepo(repoRoot) {
       const ev = readJson(path);
       checked++;
       if (!ev) { failures.push({ path: rel, reasons: ["unparseable-event"] }); continue; }
-      const verdict = await verifyEvent(ev, { directory, members, seenPaths });
+      const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
       seenPaths.add(rel);
       if (!verdict.ok) failures.push({ path: rel, reasons: verdict.reasons });
     }
