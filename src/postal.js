@@ -23,15 +23,42 @@ export async function createIdentity(displayName = "") {
   const encKp = await generateEncKeypair();
   const id = await fingerprintId(signKp.publicKey);
   return {
-    id,
+    id,                          // = fingerprint of the GENESIS sign key (immutable)
     display_name: displayName,
-    sign: signKp,   // { publicKey, privateJwk }
-    enc: encKp,     // { publicKey, privateJwk }
+    sign: signKp,                // current signing keypair { publicKey, privateJwk }
+    enc: encKp,                  // current encryption keypair
+    genesisSignPub: signKp.publicKey,
+    rotations: [],               // signed chain genesis -> current
+    encHistory: [],              // previous enc keypairs (to open old sealed messages)
+  };
+}
+
+// Rotate to fresh sign + enc keys. The id does NOT change: it stays anchored to the
+// genesis key. The new keys are authorized by a rotation entry SIGNED BY THE OLD
+// sign key, so anyone who trusted the genesis fingerprint can follow the chain.
+export async function rotateIdentity(identity, created_at) {
+  const newSign = await generateSignKeypair();
+  const newEnc = await generateEncKeypair();
+  const entry = {
+    seq: (identity.rotations?.length || 0) + 1,
+    from_sign_pub: identity.sign.publicKey,
+    to_sign_pub: newSign.publicKey,
+    to_enc_pub: newEnc.publicKey,
+    created_at: created_at || new Date().toISOString(),
+  };
+  const oldPriv = await importSignPrivate(identity.sign.privateJwk);
+  entry.sig = await sign(oldPriv, canonical(entry));
+  return {
+    ...identity,
+    sign: newSign,
+    enc: newEnc,
+    rotations: [...(identity.rotations || []), entry],
+    encHistory: [...(identity.encHistory || []), identity.enc],
   };
 }
 
 // The public identity document published to .postal/users/<id>.json.
-// Self-signed: the sign key signs the whole doc (binds id<->keys<->name).
+// Carries the rotation chain; signed by the CURRENT sign key.
 export async function publicIdentityDoc(identity) {
   const doc = {
     v: VERSION,
@@ -39,26 +66,63 @@ export async function publicIdentityDoc(identity) {
     display_name: identity.display_name || "",
     sign_key: { alg: "ECDSA-P256", pub: identity.sign.publicKey },
     enc_key: { alg: "ECDH-P256", pub: identity.enc.publicKey },
+    rotations: identity.rotations || [],
   };
   const priv = await importSignPrivate(identity.sign.privateJwk);
-  doc.sig = await sign(priv, canonical(doc));
+  doc.sig = await sign(priv, canonical(stripField(doc, "sig")));
   return doc;
 }
 
 export const userPath = (id) => `.postal/users/${id}.json`;
 
-// Verify an identity doc is internally consistent: id matches the sign key, and
-// the self-signature is valid. (Trusting the id is a SOFT, out-of-band decision.)
-export async function verifyIdentityDoc(doc) {
-  if (!doc || doc.v !== VERSION || !doc.sign_key || !doc.enc_key || !doc.sig) return false;
-  const expectId = await fingerprintId(doc.sign_key.pub);
-  if (expectId !== doc.id) return false;
-  const { sig, ...unsigned } = doc;
-  const pub = await importSignPublic(doc.sign_key.pub);
-  return verify(pub, sig, canonical(unsigned));
+const stripField = (o, k) => { const { [k]: _, ...rest } = o; return rest; };
+
+// The genesis sign key a doc's id must anchor to.
+function genesisSignPub(doc) {
+  const rot = doc.rotations || [];
+  return rot.length ? rot[0].from_sign_pub : doc.sign_key.pub;
 }
 
-export const fingerprintOf = (doc) => humanFingerprint(doc.sign_key.pub);
+// All sign public keys this identity has ever used (genesis + each rotation target).
+// Used to verify event signatures made before a rotation.
+export function identitySignKeys(doc) {
+  const keys = [genesisSignPub(doc)];
+  for (const r of doc.rotations || []) keys.push(r.to_sign_pub);
+  return [...new Set(keys)];
+}
+
+// Verify a doc is internally consistent: id anchors to the genesis key, the
+// rotation chain is intact (each rotation signed by the previous key), the current
+// keys equal the end of the chain, and the self-signature is valid.
+export async function verifyIdentityDoc(doc) {
+  if (!doc || doc.v !== VERSION || !doc.sign_key || !doc.enc_key || !doc.sig) return false;
+  const rot = doc.rotations || [];
+
+  // id anchors to genesis
+  if ((await fingerprintId(genesisSignPub(doc))) !== doc.id) return false;
+
+  // walk the rotation chain
+  let prevSign = genesisSignPub(doc);
+  let lastEnc = null;
+  for (let i = 0; i < rot.length; i++) {
+    const r = rot[i];
+    if (!r || r.seq !== i + 1 || r.from_sign_pub !== prevSign || !r.to_sign_pub || !r.to_enc_pub || !r.sig) return false;
+    const fromPub = await importSignPublic(r.from_sign_pub);
+    if (!(await verify(fromPub, r.sig, canonical(stripField(r, "sig"))))) return false;
+    prevSign = r.to_sign_pub;
+    lastEnc = r.to_enc_pub;
+  }
+
+  // current keys must equal the end of the chain
+  if (doc.sign_key.pub !== prevSign) return false;
+  if (rot.length && doc.enc_key.pub !== lastEnc) return false;
+
+  // self-signature by the current sign key
+  const cur = await importSignPublic(doc.sign_key.pub);
+  return verify(cur, doc.sig, canonical(stripField(doc, "sig")));
+}
+
+export const fingerprintOf = (doc) => humanFingerprint(genesisSignPub(doc));
 
 // --- events ------------------------------------------------------------------
 
@@ -115,7 +179,24 @@ export async function openMessage(ev, identity) {
   if (raw.indexOf(MARKER) !== 0) return null;
   const sealed = JSON.parse(decodeURIComponent(escape(atob(raw.slice(MARKER.length)))));
   const aad = canonical({ chat_id: ev.chat_id, from: ev.from, to: ev.to, id: ev.id, created_at: ev.created_at });
-  return openSealed(sealed, identity.id, identity.enc.privateJwk, aad);
+  // Try the current enc key, then any rotated-out enc keys (old sealed messages
+  // were wrapped to a previous enc key).
+  const candidates = [identity.enc, ...(identity.encHistory || [])];
+  let lastErr;
+  for (const e of candidates) {
+    try { return await openSealed(sealed, identity.id, e.privateJwk, aad); }
+    catch (err) { lastErr = err; }
+  }
+  throw lastErr || new Error("cannot open");
+}
+
+// Verify a signature against any sign key in an identity's rotation chain.
+async function verifyAgainstIdentity(doc, sig, payload) {
+  for (const k of identitySignKeys(doc)) {
+    const pub = await importSignPublic(k);
+    if (await verify(pub, sig, payload)) return true;
+  }
+  return false;
 }
 
 // --- governance (HARD: quorum of attestations) -------------------------------
@@ -172,8 +253,7 @@ async function countApprovers(ev, directory, members) {
     if (!att || !att.by || !att.sig || approvers.has(att.by) || !authorized.has(att.by)) continue;
     const doc = directory && directory[att.by];
     if (!doc) continue;
-    const pub = await importSignPublic(doc.sign_key.pub);
-    if (await verify(pub, att.sig, payload)) approvers.add(att.by);
+    if (await verifyAgainstIdentity(doc, att.sig, payload)) approvers.add(att.by);
   }
   return approvers.size;
 }
@@ -200,13 +280,13 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   const expectIdPrefix = ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
   R(ev.id.indexOf(expectIdPrefix) !== 0, "non-deterministic-id");
 
-  // 3. signature valid against the author's published sign key
+  // 3. signature valid against ANY of the author's keys (current or rotated-out),
+  //    so events signed before a key rotation remain verifiable.
   const author = directory && directory[ev.from];
   if (!author) {
     reasons.push("unknown-author");
   } else {
-    const pub = await importSignPublic(author.sign_key.pub);
-    const good = await verify(pub, ev.sig, canonical(signedView(ev)));
+    const good = await verifyAgainstIdentity(author, ev.sig, canonical(signedView(ev)));
     R(!good, "invalid-signature");
   }
 

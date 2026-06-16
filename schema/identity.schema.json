@@ -27,6 +27,22 @@
         "pub": { "type": "string" }
       }
     },
+    "rotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["seq", "from_sign_pub", "to_sign_pub", "to_enc_pub", "created_at", "sig"],
+        "additionalProperties": false,
+        "properties": {
+          "seq": { "type": "integer", "minimum": 1 },
+          "from_sign_pub": { "type": "string" },
+          "to_sign_pub": { "type": "string" },
+          "to_enc_pub": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "sig": { "type": "string" }
+        }
+      }
+    },
     "sig": { "type": "string" }
   }
 }

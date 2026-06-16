@@ -52,10 +52,35 @@ Cada identidad tiene **dos** claves P-256:
 }
 ```
 
-`verifyIdentityDoc` comprueba (HARD): el `id` coincide con la huella de `sign_key`, y
-la auto-firma es válida → **nadie puede reclamar un id que no corresponde a su clave**.
-*Confiar* en que esa identidad es quien dice ser es SOFT: se verifica la
-`humanFingerprint` fuera de banda (TOFU).
+`verifyIdentityDoc` comprueba (HARD): el `id` ancla a la **clave génesis**, la cadena de
+`rotations` está intacta y la auto-firma de la clave actual es válida → **nadie puede
+reclamar un id que no corresponde a su cadena de claves**. *Confiar* en que esa identidad
+es quien dice ser es SOFT: se verifica la `humanFingerprint` (de la clave génesis, estable)
+fuera de banda (TOFU).
+
+### Rotación de clave (el `id` no cambia)
+
+El `id` ancla a la clave génesis, así que rotar la clave de firma/cifrado **no cambia el
+id**. La identidad lleva una cadena `rotations`, donde cada entrada va **firmada por la
+clave anterior**:
+
+```json
+"rotations": [
+  { "seq": 1, "from_sign_pub": "<clave previa>", "to_sign_pub": "<clave nueva>",
+    "to_enc_pub": "<enc nueva>", "created_at": "...", "sig": "<firma de la clave previa>" }
+]
+```
+
+`verifyIdentityDoc` recorre la cadena: cada `from_sign_pub` encadena con el `to_sign_pub`
+anterior (génesis al inicio), cada `sig` valida con la clave previa, y las claves actuales
+del doc son el final de la cadena. Probado (`test/rotation.test.mjs`, 11/11): id estable,
+cadena verificada, **secuestro rechazado** (rotación no firmada por la clave previa),
+eventos firmados con una clave **antigua** siguen validando, y un mensaje sellado a una
+clave de cifrado vieja se abre con `encHistory`.
+
+**Límite honesto:** las firmas de eventos se validan contra **cualquier** clave del
+historial (no hay ventana temporal por clave), así que una clave rotada-fuera no queda
+*revocada* para firmar — eso (revocación + validación con ventana temporal) es roadmap.
 
 ## 3. Evento firmado (y, si es mensaje, sellado)
 
@@ -157,8 +182,10 @@ del autor.
 
 ## 7. Roadmap
 
-- **Rotación de clave de identidad** (`users/<id>.json`) firmada por la clave anterior.
-- Firma de `members.json`/`meta.json` (hoy `governance` se lee pero el doc no va firmado).
+- **Revocación + ventana temporal por clave**: hoy una clave rotada-fuera aún puede firmar
+  eventos (se valida contra cualquier clave del historial). Falta atar cada firma a la
+  clave vigente en `created_at` y permitir revocar.
+- Firma de `members.json`/`meta.json` (hoy `governance`/`created_by` se leen sin firma).
 - Reducción de metadatos (ids opacos, padding) — investigación.
 
 ## 8. Implementación de referencia
