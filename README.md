@@ -53,6 +53,21 @@ válido pero no puede leerlo; y un **evento falso con `from=Alice` firmado por o
 es rechazado por el gate** (`invalid-signature`) aunque esté físicamente en el repo —
 git es la verdad, el cliente verifica.
 
+## Gate en CI (required-check) — demostrado en GitHub Actions real
+
+`src/cli.js` es el gate como comando (lee el árbol de archivos):
+
+```bash
+node src/cli.js verify [repoRoot]   # exit 0 si todo pasa, 1 si algo falla
+```
+
+`.github/workflows/postal-verify.yml` lo corre en cada push/PR. **Demostrado en
+`postal-test`** con el mismo cambio rojo→verde: con un evento falso `from=Alice`
+firmado por otra clave presente en el repo, el run salió **failure** (`BLOCKED — 1
+invalid: …invalid-signature`); al quitar el evento falso, **success**. Con branch
+protection exigiendo este check, un push que introduzca eventos inválidos no puede
+mergearse — el modelo CCDD en el lado de escritura.
+
 ## Estructura
 
 ```

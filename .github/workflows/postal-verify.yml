@@ -1,0 +1,23 @@
+name: postal verify
+
+# The HARD gate as a required-check. Every push / PR runs the deterministic
+# verifier over the checked-out .postal/ tree. If any event fails (bad signature,
+# non-deterministic path, append-only violation, unknown author…), the job fails
+# and — with branch protection requiring this check — the change cannot merge.
+#
+# This is the CCDD model on the WRITE side: lo verificable lo frena una máquina.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run postal gate
+        run: node tools/postal/cli.js verify
