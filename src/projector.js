@@ -32,6 +32,44 @@ function localEmbed(text) {
   return Array.from(v, (x) => x / norm);
 }
 
+// Resolve "records": a record is a `key` with a chain of versions linked by
+// `supersedes` (event id of the version it replaces). The current value is the HEAD
+// (a version no valid event supersedes). A tombstone head = deleted. Authorization:
+// a version may supersede a record only if its author is the record's ORIGINAL author
+// OR an owner/admin (governance override). Stale/unauthorized supersedes are dropped.
+// Optimistic concurrency: an update must point at the current head; forks are flagged.
+function resolveRecords(verifiedEvents, members) {
+  const admins = new Set((members || []).filter((m) => ["owner", "admin"].includes(m.role)).map((m) => m.id));
+  const byKey = new Map();
+  for (const ev of verifiedEvents) {
+    const key = String((ev.body && ev.body.key) || "");
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(ev);
+  }
+
+  const records = new Map();
+  for (const [key, versions] of byKey) {
+    const roots = versions.filter((v) => !v.supersedes).sort((a, b) => (a.id < b.id ? -1 : 1));
+    if (!roots.length) { records.set(key, { error: "no-root" }); continue; }
+    const root = roots[0];
+    const authorized = (v) => v.from === root.from || admins.has(v.from);
+
+    let head = root;
+    const used = new Set([root.id]);
+    const conflicts = [...roots.slice(1)]; // extra roots = forked creation
+    while (true) {
+      const cands = versions.filter((v) => v.supersedes === head.id && !used.has(v.id) && authorized(v));
+      if (!cands.length) break;
+      cands.sort((a, b) => (a.id < b.id ? -1 : 1));
+      head = cands[0]; used.add(head.id);
+      for (const v of cands.slice(1)) conflicts.push(v); // forked update
+    }
+    records.set(key, { head, deleted: head.kind === "tombstone", conflicts, rootAuthor: root.from });
+  }
+  return records;
+}
+
 // Map a verified event to a derived, provenance-carrying index doc.
 function toDoc(ev) {
   const b = ev.body || {};
@@ -83,19 +121,16 @@ export function makeProjector({ db, embed = localEmbed, dim = EMBED_DIM } = {}) 
       for (const d of col.find({}).toArray()) col.removeById(d._id);
       vstore = new VectorStore(new VecMemoryAdapter(), dim); // fresh vector index
 
-      let indexed = 0, rejected = 0;
-      const best = new Map(); // supersession: highest seq per (kind,publisher,key)
-      for (const it of items) {
-        const ev = it.event;
-        if (!ev) continue;
-        if (failedPaths.has(it.path)) { rejected++; continue; }
-        const doc = toDoc(ev);
+      const rejected = failedPaths.size;
+      // Resolve records (supersession + tombstones + authorization) over verified events.
+      const verified = items.filter((it) => it.event && !failedPaths.has(it.path)).map((it) => it.event);
+      const records = resolveRecords(verified, result.members);
+
+      let indexed = 0, deleted = 0;
+      for (const rec of records.values()) {
+        if (rec.error || rec.deleted) { if (rec.deleted) deleted++; continue; } // tombstoned / broken
+        const doc = toDoc(rec.head);
         if (!doc) continue;
-        const k = doc.kind + "|" + doc.publisher + "|" + doc.key;
-        const prev = best.get(k);
-        if (!prev || (doc.seq ?? -1) > (prev.seq ?? -1)) best.set(k, doc);
-      }
-      for (const doc of best.values()) {
         col.insert(doc);
         vstore.set(VCOL, doc._id, embedText(doc), {
           key: doc.key, kind: doc.kind, publisher: doc.publisher,
@@ -104,7 +139,7 @@ export function makeProjector({ db, embed = localEmbed, dim = EMBED_DIM } = {}) 
         });
         indexed++;
       }
-      return { indexed, rejected, total: items.length };
+      return { indexed, rejected, deleted, total: items.length };
     },
 
     // Lexical queries — every result carries provenance (publisher, event_id, verified).

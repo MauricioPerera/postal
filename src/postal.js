@@ -193,7 +193,7 @@ function makeEventId(createdAt, from, rnd) {
 // and prev is the hash of that author's previous event. Both are signed, so order and
 // continuity no longer depend on the spoofable created_at, and deleting a middle event
 // breaks the successor's prev link.
-export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients, seq, prev }) {
+export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients, seq, prev, supersedes }) {
   const ev = {
     v: VERSION,
     kind,
@@ -203,6 +203,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
     created_at,
     id: makeEventId(created_at, identity.id, rnd),
     ...(seq != null ? { seq, prev: prev || null } : {}),
+    ...(supersedes !== undefined ? { supersedes: supersedes || null } : {}),
     body: body || {},
   };
 
@@ -399,7 +400,7 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 
   // 1. schema-lite: required shape
   R(!ev || ev.v !== VERSION, "bad-version");
-  R(!ev || !ev.kind || !["message", "receipt", "member", "knowledge", "skill"].includes(ev.kind), "bad-kind");
+  R(!ev || !ev.kind || !["message", "receipt", "member", "knowledge", "skill", "tombstone"].includes(ev.kind), "bad-kind");
   R(!ev || !ev.from || !ev.chat_id || !ev.id || !ev.created_at, "missing-fields");
   R(ev && !Array.isArray(ev.to), "to-not-array");
   R(ev && Number.isNaN(Date.parse(ev.created_at || "")), "bad-date");

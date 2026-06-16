@@ -21,20 +21,21 @@ const directory = {
 
 const chain = chainState();
 const item = (ev) => ({ path: eventPath(chat, ev), event: ev });
-async function knowledge(who, key, value, when) {
+async function knowledge(who, key, value, when, supersedes) {
   const { seq, prev } = chain.next(who.id, chat);
-  const ev = await buildEvent(who, { kind: "knowledge", chat_id: chat, created_at: when, rnd: "k" + key + seq, body: { key, value }, seq, prev });
+  const ev = await buildEvent(who, { kind: "knowledge", chat_id: chat, created_at: when, rnd: "k" + key + seq, body: { key, value }, seq, prev, supersedes });
   await chain.record(ev);
   return item(ev);
 }
 
 // Alice (owner) admits Bob as a member, then both publish knowledge.
 const addBob = item(await buildMemberEvent(alice, { chat_id: chat, created_at: "2026-06-16T19:00:00.000Z", rnd: "addb", op: "add", target: bob.id, role: "member" }));
+const capV0 = await knowledge(alice, "capital-fr", "La capital de Francia es Paris", "2026-06-16T20:00:00.000Z");
 const items = [
   addBob,
-  await knowledge(alice, "capital-fr", "La capital de Francia es Paris", "2026-06-16T20:00:00.000Z"),
+  capV0,
   await knowledge(bob, "ph-water", "El pH del agua pura es 7", "2026-06-16T20:30:00.000Z"),
-  await knowledge(alice, "capital-fr", "La capital de Francia es Paris (actualizado)", "2026-06-16T21:00:00.000Z"), // supersedes
+  await knowledge(alice, "capital-fr", "La capital de Francia es Paris (actualizado)", "2026-06-16T21:00:00.000Z", capV0.event.id), // supersedes v0
 ];
 
 console.log("# only verified events are indexed");

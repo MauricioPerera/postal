@@ -7,7 +7,10 @@
   "additionalProperties": false,
   "properties": {
     "v": { "const": 1 },
-    "kind": { "enum": ["message", "receipt", "member"] },
+    "kind": { "enum": ["message", "receipt", "member", "knowledge", "skill", "tombstone"] },
+    "seq": { "type": "integer", "minimum": 0 },
+    "prev": { "type": ["string", "null"] },
+    "supersedes": { "type": ["string", "null"] },
     "chat_id": { "type": "string", "minLength": 1 },
     "from": { "type": "string", "pattern": "^[0-9A-F]{16}$" },
     "to": { "type": "array", "items": { "type": "string" } },
