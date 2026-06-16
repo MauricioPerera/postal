@@ -53,3 +53,17 @@ lo verificado. Es lo que el ecosistema de skills no tiene hoy: procedencia y rev
 Solo se indexa lo que el indexador puede **leer**: contenido sellado E2EE para otros no es
 indexable (la tensión metadatos/búsqueda de siempre). Para un KB consultable, el contenido
 indexable va en claro (su confianza la da la firma, no el cifrado).
+
+## Búsqueda semántica (RAG) — `js-vector-store`
+
+El projector también construye un **índice vectorial** en paralelo: cada conocimiento
+verificado se embebe y se indexa con su procedencia, y `semanticSearch(texto)` rankea por
+coseno. Probado (`test/vector.test.mjs`, 7/7): una consulta ("animales mamíferos
+domésticos") rankea los docs de animales sobre el de motores; el **veneno falsificado nunca
+entra** al índice vectorial; revocar un publisher **elimina sus vectores** al reproyectar.
+
+El embedder es **enchufable** (`makeProjector({ embed })`). Por defecto trae uno local
+determinista (overlap léxico) para correr offline; en producción se pasa un modelo real
+(`js-vector-store` ya soporta cuantización, IVF, BM25 híbrido, reranker). La regla con
+Postal no cambia: **solo se vectoriza lo que pasa el gate**. El embedder por defecto es un
+*placeholder* léxico, no semántico real — eso lo aporta el modelo que se enchufe.
