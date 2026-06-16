@@ -137,3 +137,67 @@ export async function openSealed(sealed, id, encPrivateJwk, aad = "") {
   );
   return decryptString(cek, { iv: sealed.iv, ct: sealed.ct }, aad);
 }
+
+// --- anonymous sealing: recipients carry NO id (metadata reduction) -----------
+//
+// Like sealForRecipients, but the wrapped content keys are an unlabeled ARRAY:
+// a recipient finds theirs by trial-unwrapping, so the envelope never names who
+// can read it. The wrap list is shuffled and padded with indistinguishable decoys
+// to a bucket, so even the recipient COUNT only leaks coarsely. Body is padded to a
+// length bucket to hide message size.
+
+function padToBucket(n, bucket) { return Math.ceil((n + 1) / bucket) * bucket; }
+
+// Deterministic-ish shuffle driven by a seed byte stream (no Math.random).
+function shuffle(arr, seedBytes) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = seedBytes[(a.length - 1 - i) % seedBytes.length] % (i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+export async function sealAnonymous(plaintext, recipientPubs, aad = "", { keySlots = 4, sizeBucket = 256 } = {}) {
+  const cek = await newContentKey();
+  const eph = await newEphemeral();
+
+  // pad the plaintext to a size bucket before encrypting (hide length)
+  const padded = String(plaintext) + " ".repeat(Math.max(0, padToBucket(String(plaintext).length, sizeBucket) - String(plaintext).length));
+  const body = await encryptString(cek, padded, aad);
+
+  const wraps = [];
+  for (const pubB64 of recipientPubs) {
+    const wk = await deriveWrapKey(eph.privateKey, await importEncPublic(pubB64));
+    const iv = randomBytes(IV_BYTES);
+    const wrapped = await subtle.wrapKey("raw", cek, wk, { name: "AES-GCM", iv, additionalData: utf8Bytes(aad) });
+    wraps.push({ iv: bytesToBase64(iv), ct: bytesToBase64(new Uint8Array(wrapped)) });
+  }
+  // decoys: random blobs the size of a real wrap; nobody can unwrap them
+  const slots = Math.max(keySlots, padToBucket(wraps.length, keySlots));
+  while (wraps.length < slots) {
+    wraps.push({ iv: bytesToBase64(randomBytes(IV_BYTES)), ct: bytesToBase64(randomBytes(48)) });
+  }
+
+  return { alg: "ECDH-P256+AES-256-GCM/anon", epk: eph.publicKey, iv: body.iv, ct: body.ct, w: shuffle(wraps, eph.publicKey ? base64ToBytes(eph.publicKey) : new Uint8Array([1])) };
+}
+
+// Try every wrap until one yields the content key, then decrypt. Returns the
+// plaintext with size-padding trimmed, or throws if none is for us.
+export async function openAnonymous(env, encPrivateJwk, aad = "") {
+  const priv = await importEncPrivate(encPrivateJwk);
+  const eph = await importEncPublic(env.epk);
+  const wk = await deriveWrapKey(priv, eph);
+  for (const wrap of env.w || []) {
+    try {
+      const cek = await subtle.unwrapKey(
+        "raw", base64ToBytes(wrap.ct), wk,
+        { name: "AES-GCM", iv: base64ToBytes(wrap.iv), additionalData: utf8Bytes(aad) },
+        { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+      );
+      const out = await decryptString(cek, { iv: env.iv, ct: env.ct }, aad);
+      return out.replace(/ +$/, ""); // trim size padding
+    } catch { /* not our slot, keep trying */ }
+  }
+  throw new Error("not a recipient");
+}
