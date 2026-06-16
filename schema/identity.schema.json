@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://postal.dev/schema/identity.json",
+  "title": "Postal Identity Document",
+  "type": "object",
+  "required": ["v", "id", "sign_key", "enc_key", "sig"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[0-9A-F]{16}$" },
+    "display_name": { "type": "string", "maxLength": 256 },
+    "sign_key": {
+      "type": "object",
+      "required": ["alg", "pub"],
+      "additionalProperties": false,
+      "properties": {
+        "alg": { "const": "ECDSA-P256" },
+        "pub": { "type": "string" }
+      }
+    },
+    "enc_key": {
+      "type": "object",
+      "required": ["alg", "pub"],
+      "additionalProperties": false,
+      "properties": {
+        "alg": { "const": "ECDH-P256" },
+        "pub": { "type": "string" }
+      }
+    },
+    "sig": { "type": "string" }
+  }
+}

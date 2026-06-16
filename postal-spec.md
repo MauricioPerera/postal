@@ -1,0 +1,129 @@
+# Postal — Protocol Spec v1 (draft)
+
+> Eventos **firmados, sellados y append-only** sobre git. Mensajería (y coordinación
+> de agentes) sin backend, donde **lo verificable lo comprueba una máquina y lo
+> opinable lo decide un humano**.
+
+Postal es un **contrato de contexto híbrido** al estilo
+[CCDD](https://github.com/MauricioPerera/ccdd): el repositorio git es la fuente de
+verdad; cada archivo es un evento; un **gate determinista** (`verifyEvent`) separa lo
+que se *verifica* de lo que se *juzga*. No hereda nada de implementaciones previas más
+que la idea de "un archivo por evento".
+
+## 0. Principios
+
+1. **Git es la verdad.** Todo lo demás (índices, caché) se reconstruye.
+2. **Un evento = un archivo JSON inmutable.** Sin edición ni borrado in-place.
+3. **Identidad = clave, no nombre.** El `id` es la huella de la clave de firma.
+4. **Todo evento va firmado.** Sin firma válida, el gate lo descarta.
+5. **El contenido va sellado.** El cuerpo de un mensaje se cifra por-destinatario.
+6. **Híbrido CCDD:** lo duro a un gate, lo blando a una persona (ver §4).
+
+## 1. Layout del repositorio
+
+```text
+.postal/
+  protocol.json                                  # metadatos del protocolo
+  users/<id>.json                                # identidad pública (auto-firmada)
+  chats/<chat_id>/meta.json                      # título, creador (firmado)
+  chats/<chat_id>/members.json                   # membresía + roles (firmado/quórum)
+  chats/<chat_id>/events/YYYY/MM/DD/<id>.json    # mensajes, recibos, cambios
+```
+
+Un evento puede ser `kind`: `message`, `receipt` o `member`. El `id` es
+`<created_at con :. → ->_<from>_<rnd>`, así el **path es determinista** y verificable
+sin abrir el archivo.
+
+## 2. Identidad (`users/<id>.json`)
+
+Cada identidad tiene **dos** claves P-256:
+
+- **sign** (ECDSA P-256) → autenticidad. El `id` = primeros 64 bits de `SHA-256(sign_pub)`.
+- **enc** (ECDH P-256) → confidencialidad (sellado por-destinatario).
+
+```json
+{
+  "v": 1,
+  "id": "A1B2C3D4E5F60718",
+  "display_name": "Alice",
+  "sign_key": { "alg": "ECDSA-P256", "pub": "<base64 raw>" },
+  "enc_key":  { "alg": "ECDH-P256",  "pub": "<base64 raw>" },
+  "sig": "<auto-firma ECDSA sobre el doc canónico sin sig>"
+}
+```
+
+`verifyIdentityDoc` comprueba (HARD): el `id` coincide con la huella de `sign_key`, y
+la auto-firma es válida → **nadie puede reclamar un id que no corresponde a su clave**.
+*Confiar* en que esa identidad es quien dice ser es SOFT: se verifica la
+`humanFingerprint` fuera de banda (TOFU).
+
+## 3. Evento firmado (y, si es mensaje, sellado)
+
+```json
+{
+  "v": 1,
+  "kind": "message",
+  "chat_id": "c1",
+  "from": "A1B2C3D4E5F60718",
+  "to": ["B0B0..."],
+  "created_at": "2026-06-16T20:00:00.000Z",
+  "id": "2026-06-16T20-00-00-000Z_A1B2..._a1b2c3",
+  "body": { "sealed": "POSTAL1:<base64 del sobre cifrado>" },
+  "sig": "<ECDSA sobre canonical(evento sin sig)>"
+}
+```
+
+- **Firmar:** `sig = ECDSA(sign_priv, canonical(evento sin sig))`. La serialización
+  canónica (claves ordenadas, recursiva) garantiza bytes idénticos para objetos iguales.
+- **Sellar (solo `message`):** el cuerpo se cifra con clave de contenido AES-256-GCM,
+  envuelta por-destinatario vía ECDH efímero (forward secrecy). AAD = metadatos del
+  evento → el sobre no puede reubicarse a otro evento/chat.
+- **Orden:** se **sella y luego se firma**: la firma cubre el ciphertext + metadatos.
+  Cualquiera verifica la firma (público); solo los destinatarios abren el sobre.
+
+## 4. El contrato híbrido (CCDD)
+
+| Parte **dura** — `verifyEvent`, gate determinista | Parte **blanda** — humano (modelo informa, no decide) |
+|---|---|
+| Esquema del evento (shape, tipos, `v==1`) | **Confiar** en una identidad nueva (huella OOB) |
+| **Path determinista** desde `created_at`+`from` | Admitir a un **miembro** nuevo |
+| **Firma ECDSA** válida contra la clave publicada | **Contenido** del mensaje (texto: no se "verifica verdad") |
+| **Autorización**: `from` ∈ `members` con rol válido | `display_name` (cosmético, no confiable) |
+| **Append-only**: el path no existía | Moderación / política del chat |
+| Sobre de cifrado bien formado | Cambios de política razonables |
+
+**Regla de oro:** lo verificable → gate automático (exit≠0 lo bloquea); lo opinable →
+una persona. El gate corre en **dos** sitios:
+
+1. **Al leer (cliente):** git es la verdad; un evento que no pasa el gate se **ignora**.
+2. **En CI (gate de git):** una GitHub Action + branch protection **rechaza** el push
+   que introduce eventos inválidos. (Modelo análogo al `ccdd diff` required-check.)
+
+## 5. Gobernanza (quórum) — `members.json`
+
+Cambios sensibles (subir a alguien a `owner`/`admin`, rotar una clave, expulsar) son
+eventos `kind:"member"` que requieren **K atestaciones** (firmas ECDSA de owners/admins
+existentes). El gate cuenta firmas válidas: política blanda, *enforcement* duro. (v1
+implementa firma+verify de eventos; el conteo de quórum es §7 roadmap.)
+
+## 6. Alcance honesto (qué Postal **no** hace)
+
+- **Metadatos expuestos.** `from`/`to`/`created_at` y la estructura de paths son visibles
+  para quien tenga acceso al repo. Postal cifra el *contenido*, no el *grafo social*.
+- **Distribución inicial de clave.** Confiar en una huella sigue siendo decisión humana OOB.
+- **Modelo de escritura de git.** Cualquiera con write puede empujar; el enforcement real
+  es branch-protection+Action (servidor) o verify-on-read (cliente). Elige según tu riesgo.
+- **Veracidad del contenido.** Firmar prueba *quién* lo dijo, no *si es cierto*.
+
+## 7. Roadmap
+
+- Conteo de quórum y rotación de claves en el gate.
+- Firma de `members.json`/`meta.json` (hoy especificado, no enforced en la referencia).
+- GitHub Action de ejemplo (`postal verify`) como required check.
+- Transporte (lectura/escritura de `.postal/` vía API de host git).
+- Reducción de metadatos (ids opacos, padding) — investigación.
+
+## 8. Implementación de referencia
+
+`src/crypto.js` (primitivas), `src/postal.js` (identidad, eventos, gate),
+`test/postal.test.mjs` (16/16). Isomórfico: navegador + Node, solo WebCrypto.
