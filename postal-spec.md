@@ -99,7 +99,25 @@ una persona. El gate corre en **dos** sitios:
 2. **En CI (gate de git):** una GitHub Action + branch protection **rechaza** el push
    que introduce eventos inválidos. (Modelo análogo al `ccdd diff` required-check.)
 
-## 5. Gobernanza (quórum) — `members.json`
+## 4.1 Replay de membresía (sin confiar en un snapshot)
+
+La autorización y el quórum dependen de la membresía **en el momento** de cada evento.
+En vez de fiarse de un `members.json` (que podría estar obsoleto o ser falsificado), el
+gate **reconstruye** la membresía: arranca del owner génesis (`meta.json.created_by`) y
+aplica cada evento `member` **válido** en orden cronológico (`created_at`, desempate por
+`id`). Cada evento se verifica contra la membresía vigente en su posición temporal —
+`verifyChat(items, { directory, genesisOwner, governance })`.
+
+**Regla de bootstrap:** `add` tiene quórum 1, así el owner génesis puede incorporar a los
+primeros admins directamente (`op:"add", role:"admin"`); **promover** a un miembro
+existente (`set_role`) exige el quórum completo. Evita el deadlock de un solo owner.
+
+Probado (`test/replay.test.mjs`, 5/5): un mensaje de alguien aún no añadido se rechaza
+(`author-not-member`); la línea temporal correcta (añadir → promover) replica limpio; el
+owner solo arranca añadiendo un admin (quórum 1) pero no puede `set_role` solo (quórum 2).
+`members.json` queda como **caché derivada**, no como fuente de verdad.
+
+## 5. Gobernanza (quórum) — eventos `member`
 
 Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove` |
 `set_role`, que requieren **K atestaciones** (firmas ECDSA de owners/admins
@@ -139,9 +157,6 @@ del autor.
 
 ## 7. Roadmap
 
-- **Replay de membresía**: el gate hoy verifica eventos `member` contra el snapshot
-  `members.json`; falta reconstruir la membresía desde el génesis (creador = owner) y
-  aplicar `applyMemberEvent` en orden, para validar cadenas de cambios sin snapshot.
 - **Rotación de clave de identidad** (`users/<id>.json`) firmada por la clave anterior.
 - Firma de `members.json`/`meta.json` (hoy `governance` se lee pero el doc no va firmado).
 - Reducción de metadatos (ids opacos, padding) — investigación.

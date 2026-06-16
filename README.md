@@ -74,7 +74,7 @@ mergearse — el modelo CCDD en el lado de escritura.
 postal-spec.md            contrato híbrido + layout + reglas del gate
 schema/                   JSON Schema de identidad y evento (la parte dura)
 src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint
-src/postal.js             identidad, eventos firmados/sellados, verifyEvent (gate)
+src/postal.js             identidad, eventos firmados/sellados, verifyEvent + verifyChat (replay)
 src/github.js             transporte: Contents/Trees API (isomórfico)
 src/transport.js          protocolo-sobre-git: publish, post, poll (verify-on-read)
 test/postal.test.mjs      16 tests de protocolo (offline)

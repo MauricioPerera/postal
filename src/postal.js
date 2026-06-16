@@ -235,3 +235,39 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 
   return { ok: reasons.length === 0, reasons };
 }
+
+// --- chat replay: rebuild membership from genesis (no snapshot needed) --------
+//
+// Authorization and quorum depend on the membership AS OF each event. Rather than
+// trust a possibly-stale (or forged) members.json, replay the chat: start from the
+// genesis owner (meta.created_by) and apply each VALID member event in order. Every
+// event is verified against the membership state at its position in time.
+//
+// Bootstrap rule: `add` has quorum 1, so the genesis owner can bring in the first
+// admins directly (op:"add", role:"admin"); promoting an EXISTING member (set_role)
+// needs the full quorum. This avoids a single-owner deadlock.
+//
+// items: [{ path, event }]. Returns { ok, members, results:[{path,verdict}], failures }.
+export async function verifyChat(items, { directory, genesisOwner, governance } = {}) {
+  const sorted = [...items].filter((it) => it && it.event).sort((a, b) => {
+    const ta = String(a.event.created_at || ""), tb = String(b.event.created_at || "");
+    if (ta !== tb) return ta < tb ? -1 : 1;
+    return String(a.event.id || "") < String(b.event.id || "") ? -1 : 1;
+  });
+
+  let members = genesisOwner ? [{ id: genesisOwner, role: "owner" }] : null;
+  const seenPaths = new Set();
+  const results = [];
+  const failures = [];
+
+  for (const it of sorted) {
+    const ev = it.event;
+    const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
+    seenPaths.add(eventPath(ev.chat_id, ev));
+    results.push({ path: it.path, verdict });
+    if (!verdict.ok) { failures.push({ path: it.path, reasons: verdict.reasons }); continue; }
+    if (ev.kind === "member" && members) members = applyMemberEvent(members, ev);
+  }
+
+  return { ok: failures.length === 0, members, results, failures };
+}

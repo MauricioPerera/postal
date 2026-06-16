@@ -11,7 +11,7 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { verifyIdentityDoc, verifyEvent } from "./postal.js";
+import { verifyIdentityDoc, verifyChat } from "./postal.js";
 
 function walk(dir) {
   if (!existsSync(dir)) return [];
@@ -47,21 +47,23 @@ export async function verifyRepo(repoRoot) {
     : [];
 
   for (const chat of chats) {
-    const membersDoc = readJson(join(chatsDir, chat, "members.json"));
-    const members = membersDoc && Array.isArray(membersDoc.members) ? membersDoc.members : null;
     const meta = readJson(join(chatsDir, chat, "meta.json"));
+    const genesisOwner = meta && meta.created_by ? meta.created_by : undefined;
     const governance = meta && meta.governance ? meta.governance : undefined;
-    const seenPaths = new Set();
+    if (!genesisOwner) failures.push({ path: `.postal/chats/${chat}/meta.json`, reasons: ["missing-genesis-owner"] });
 
-    for (const path of walk(join(chatsDir, chat, "events")).sort()) {
+    // Gather all events; membership is REPLAYED from genesis, not trusted from a snapshot.
+    const items = [];
+    for (const path of walk(join(chatsDir, chat, "events"))) {
       const rel = relative(root, path).split(sep).join("/");
-      const ev = readJson(path);
+      const event = readJson(path);
       checked++;
-      if (!ev) { failures.push({ path: rel, reasons: ["unparseable-event"] }); continue; }
-      const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
-      seenPaths.add(rel);
-      if (!verdict.ok) failures.push({ path: rel, reasons: verdict.reasons });
+      if (!event) { failures.push({ path: rel, reasons: ["unparseable-event"] }); continue; }
+      items.push({ path: rel, event });
     }
+
+    const chatResult = await verifyChat(items, { directory, genesisOwner, governance });
+    for (const f of chatResult.failures) failures.push(f);
   }
 
   return { ok: failures.length === 0, checked, identities: Object.keys(directory).length, failures };

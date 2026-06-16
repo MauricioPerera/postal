@@ -26,6 +26,8 @@ write(userPath(bob.id), await publicIdentityDoc(bob));
 write(userPath(eve.id), await publicIdentityDoc(eve));
 
 const chat = "c1";
+// meta.json declares the genesis owner; membership is replayed from here.
+write(`.postal/chats/${chat}/meta.json`, { v: 1, id: chat, created_by: alice.id, created_at: "2026-06-16T19:59:00.000Z" });
 const recipients = [
   { id: alice.id, encPublicKey: alice.enc.publicKey },
   { id: bob.id, encPublicKey: bob.enc.publicKey },

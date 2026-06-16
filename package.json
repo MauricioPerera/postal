@@ -4,5 +4,5 @@
   "type": "module",
   "description": "Postal — signed, sealed, append-only event protocol over git (CCDD hybrid contract).",
   "license": "MIT",
-  "scripts": { "test": "node test/postal.test.mjs && node test/cli.test.mjs && node test/governance.test.mjs" }
+  "scripts": { "test": "node test/postal.test.mjs && node test/cli.test.mjs && node test/governance.test.mjs && node test/replay.test.mjs" }
 }
