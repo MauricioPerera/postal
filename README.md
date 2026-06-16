@@ -28,12 +28,30 @@ rechaza el push inválido). Detalle: [`postal-spec.md`](postal-spec.md).
 ## Probarlo
 
 ```bash
-node test/postal.test.mjs    # 16 passed, 0 failed
+node test/postal.test.mjs    # 16 passed, 0 failed  (protocolo, offline)
+
+# transporte real contra un repo privado de GitHub:
+GH_TOKEN=$(gh auth token) GH_OWNER=<owner> GH_REPO=<repo> node test/integration.test.mjs
+# 9 passed, 0 failed
 ```
 
 Cubre: identidad auto-firmada, anti-suplantación (id≠clave rechazado), mensaje
 firmado+sellado, apertura solo por destinatario, y el gate rechazando firma forjada,
 campo manipulado, autor no-miembro, autor desconocido, sobrescritura e id no determinista.
+
+## Transporte sobre git (verificado contra repo privado real)
+
+`src/github.js` (Contents/Trees API) + `src/transport.js` unen protocolo y git:
+
+- `publishIdentity` → publica tu identidad auto-firmada en `.postal/users/<id>.json`
+- `postMessage` → firma + sella y commitea el evento
+- `pollChat` → lista, corre el **gate al leer** (`verifyEvent`) y descifra lo tuyo
+
+**Probado contra un repo privado real** (9/9): GitHub almacena solo eventos sellados
+(`POSTAL1:`) + firmados, sin texto plano; Bob pasa el gate y descifra; Eve ve un evento
+válido pero no puede leerlo; y un **evento falso con `from=Alice` firmado por otra clave
+es rechazado por el gate** (`invalid-signature`) aunque esté físicamente en el repo —
+git es la verdad, el cliente verifica.
 
 ## Estructura
 
@@ -42,7 +60,10 @@ postal-spec.md            contrato híbrido + layout + reglas del gate
 schema/                   JSON Schema de identidad y evento (la parte dura)
 src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint
 src/postal.js             identidad, eventos firmados/sellados, verifyEvent (gate)
-test/postal.test.mjs      16 tests con WebCrypto real
+src/github.js             transporte: Contents/Trees API (isomórfico)
+src/transport.js          protocolo-sobre-git: publish, post, poll (verify-on-read)
+test/postal.test.mjs      16 tests de protocolo (offline)
+test/integration.test.mjs 9 tests contra repo privado real
 ```
 
 ## Alcance honesto
