@@ -171,6 +171,27 @@ Probado (`test/replay.test.mjs`, 5/5): un mensaje de alguien aún no añadido se
 owner solo arranca añadiendo un admin (quórum 1) pero no puede `set_role` solo (quórum 2).
 `members.json` queda como **caché derivada**, no como fuente de verdad.
 
+## 4.2 Hash-chain por autor (orden e integridad sin confiar en el tiempo)
+
+Cada evento puede llevar `seq` (contador por autor-y-chat, desde 0) y `prev` (hash del
+evento anterior del mismo autor). Ambos van **firmados**. Así:
+
+- El **orden** lo define la cadena (`seq`/`prev`), no el `created_at` — que es
+  falsificable. **Backdatear ya no reordena la historia.**
+- **Borrar un evento del medio** rompe la cadena: el sucesor declara un `prev`/`seq` que
+  no casa con lo presente → `chain-gap` / `chain-prev-mismatch`.
+- **Manipular un evento** cambia su hash → el `prev` del siguiente deja de coincidir; la
+  alteración se propaga y se detecta.
+
+`verifyChat` agrupa por autor, ordena por `seq` y comprueba continuidad desde 0 y los
+enlaces `prev`. Probado (`test/chain.test.mjs`, 5/5): cadena válida pasa, deleción del
+medio detectada, manipulación propagada, y la cadena verifica en **cualquier** orden de
+entrada (el `seq` manda).
+
+**Límite honesto:** la **truncación de la cola** (borrar los últimos eventos de un autor)
+no se detecta desde dentro — no hay sucesor que los referencie. Cerrarlo requiere un
+**head firmado/checkpoint** publicado por el autor (roadmap).
+
 ## 5. Gobernanza (quórum) — eventos `member`
 
 Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove` |
@@ -212,6 +233,7 @@ del autor.
 ## 7. Roadmap
 
 - Firma de receipts y de eventos de membresía con doble propósito (auditoría externa).
+- Head firmado / checkpoint por autor: detectar truncación de la cola del hash-chain.
 - Modo privado avanzado: distribución de claves fuera de banda (no publicar en `users/`).
 - Cliente HTML de un archivo que hable el protocolo (identidad, rotación, huellas OOB,
   enviar/leer con gate).

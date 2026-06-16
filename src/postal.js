@@ -7,7 +7,7 @@
 // + signature + append-only, checked at read-time AND in CI.
 
 import {
-  canonical, fingerprintId, humanFingerprint,
+  canonical, fingerprintId, humanFingerprint, sha256, utf8Bytes,
   generateSignKeypair, generateEncKeypair,
   importSignPublic, importSignPrivate, sign, verify,
   sealForRecipients, openSealed,
@@ -189,7 +189,11 @@ function makeEventId(createdAt, from, rnd) {
 // kind: "message" | "receipt" | "member"
 //   message  -> body.text encrypted for `recipients` ([{id, encPublicKey}])
 //   others   -> body is signed but stored in clear (no secret content)
-export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients }) {
+// `seq`/`prev` chain an author's events: seq is a per-author-per-chat counter (from 0)
+// and prev is the hash of that author's previous event. Both are signed, so order and
+// continuity no longer depend on the spoofable created_at, and deleting a middle event
+// breaks the successor's prev link.
+export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients, seq, prev }) {
   const ev = {
     v: VERSION,
     kind,
@@ -198,6 +202,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
     to: [...to].sort(),
     created_at,
     id: makeEventId(created_at, identity.id, rnd),
+    ...(seq != null ? { seq, prev: prev || null } : {}),
     body: body || {},
   };
 
@@ -220,6 +225,59 @@ async function sealEnvelope(text, recipients, aad) {
 // attestations. Both the author's `sig` and each attestor's signature cover this,
 // so adding attestations never invalidates the author's signature.
 const signedView = (ev) => { const { sig, attestations, ...rest } = ev; return rest; };
+
+// Hash of a full stored event (canonical bytes, including its signature). This is the
+// value the NEXT event in the same author's chain references as `prev`.
+export async function eventHash(ev) {
+  const h = await sha256(utf8Bytes(canonical(ev)));
+  return Array.from(h).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Tracks per-author-per-chat seq + last hash, so a sender can build a continuous chain.
+export function chainState() {
+  const seqOf = new Map(), lastHash = new Map();
+  const key = (from, chat) => from + "|" + chat;
+  return {
+    next(from, chat) {
+      const k = key(from, chat);
+      return { seq: seqOf.has(k) ? seqOf.get(k) + 1 : 0, prev: lastHash.get(k) || null };
+    },
+    async record(ev) {
+      const k = key(ev.from, ev.chat_id);
+      seqOf.set(k, ev.seq);
+      lastHash.set(k, await eventHash(ev));
+    },
+  };
+}
+
+// Verify per-author hash chains: seq contiguous from 0 and each prev = hash of the
+// author's previous event. Detects deletion/omission (gap or broken link) and any
+// tampering (a changed event changes its hash, breaking the successor's prev).
+// Only events carrying a numeric `seq` are chained. Returns [{ path, reasons }].
+async function verifyChains(items) {
+  const groups = new Map();
+  for (const it of items) {
+    if (!it.event || typeof it.event.seq !== "number") continue;
+    const k = it.event.from + "|" + it.event.chat_id;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
+  }
+  const failures = [];
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.event.seq - b.event.seq);
+    let expected = 0, prevHash = null;
+    for (const it of list) {
+      const ev = it.event;
+      const reasons = [];
+      if (ev.seq !== expected) reasons.push(`chain-gap(expected ${expected}, got ${ev.seq})`);
+      if ((ev.prev || null) !== prevHash) reasons.push("chain-prev-mismatch");
+      if (reasons.length) failures.push({ path: it.path, reasons });
+      prevHash = await eventHash(ev);
+      expected = ev.seq + 1;
+    }
+  }
+  return failures;
+}
 
 // Open a message event as `identity` (decrypt the sealed body).
 export async function openMessage(ev, identity) {
@@ -420,6 +478,9 @@ export async function verifyChat(items, { directory, genesisOwner, governance } 
     if (!verdict.ok) { failures.push({ path: it.path, reasons: verdict.reasons }); continue; }
     if (ev.kind === "member" && members) members = applyMemberEvent(members, ev);
   }
+
+  // Per-author hash-chain integrity (order/continuity independent of created_at).
+  for (const f of await verifyChains(sorted)) failures.push(f);
 
   return { ok: failures.length === 0, members, results, failures };
 }
