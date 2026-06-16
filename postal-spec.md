@@ -78,9 +78,15 @@ cadena verificada, **secuestro rechazado** (rotación no firmada por la clave pr
 eventos firmados con una clave **antigua** siguen validando, y un mensaje sellado a una
 clave de cifrado vieja se abre con `encHistory`.
 
-**Límite honesto:** las firmas de eventos se validan contra **cualquier** clave del
-historial (no hay ventana temporal por clave), así que una clave rotada-fuera no queda
-*revocada* para firmar — eso (revocación + validación con ventana temporal) es roadmap.
+**Ventana temporal y revocación** (`test/revocation.test.mjs`, 7/7): cada clave tiene una
+ventana `[activa_desde, retirada_en)` derivada de la cadena. Una firma solo vale si el
+`created_at` del evento cae en la ventana de la clave que firmó:
+
+- **Rotación graceful:** la clave vieja solo firma eventos **fechados antes** de su
+  rotación; un evento posterior firmado con ella se rechaza.
+- **Rotación con `reason:"compromise"`:** la clave vieja queda **revocada para todo**
+  evento, incluso uno **backdated** — porque una clave comprometida pudo fabricar fechas
+  falsas. Solo la clave nueva (actual) sigue válida.
 
 ## 3. Evento firmado (y, si es mensaje, sellado)
 
@@ -182,11 +188,10 @@ del autor.
 
 ## 7. Roadmap
 
-- **Revocación + ventana temporal por clave**: hoy una clave rotada-fuera aún puede firmar
-  eventos (se valida contra cualquier clave del historial). Falta atar cada firma a la
-  clave vigente en `created_at` y permitir revocar.
 - Firma de `members.json`/`meta.json` (hoy `governance`/`created_by` se leen sin firma).
 - Reducción de metadatos (ids opacos, padding) — investigación.
+- Cliente HTML de un archivo que hable el protocolo (identidad, rotación, huellas OOB,
+  enviar/leer con gate).
 
 ## 8. Implementación de referencia
 

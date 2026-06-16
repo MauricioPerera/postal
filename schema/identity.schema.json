@@ -39,6 +39,7 @@
           "to_sign_pub": { "type": "string" },
           "to_enc_pub": { "type": "string" },
           "created_at": { "type": "string", "format": "date-time" },
+          "reason": { "type": "string", "description": "compromise = old key fully revoked" },
           "sig": { "type": "string" }
         }
       }

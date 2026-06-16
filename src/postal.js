@@ -36,7 +36,11 @@ export async function createIdentity(displayName = "") {
 // Rotate to fresh sign + enc keys. The id does NOT change: it stays anchored to the
 // genesis key. The new keys are authorized by a rotation entry SIGNED BY THE OLD
 // sign key, so anyone who trusted the genesis fingerprint can follow the chain.
-export async function rotateIdentity(identity, created_at) {
+// `reason: "compromise"` marks the OLD key as fully revoked: events signed by it are
+// rejected regardless of timestamp (a compromised key could have backdated forgeries).
+// Any other/absent reason is a graceful rotation: the old key stays valid only for
+// events dated before this rotation.
+export async function rotateIdentity(identity, created_at, reason) {
   const newSign = await generateSignKeypair();
   const newEnc = await generateEncKeypair();
   const entry = {
@@ -45,9 +49,10 @@ export async function rotateIdentity(identity, created_at) {
     to_sign_pub: newSign.publicKey,
     to_enc_pub: newEnc.publicKey,
     created_at: created_at || new Date().toISOString(),
+    ...(reason ? { reason } : {}),
   };
   const oldPriv = await importSignPrivate(identity.sign.privateJwk);
-  entry.sig = await sign(oldPriv, canonical(entry));
+  entry.sig = await sign(oldPriv, canonical(stripField(entry, "sig")));
   return {
     ...identity,
     sign: newSign,
@@ -190,10 +195,33 @@ export async function openMessage(ev, identity) {
   throw lastErr || new Error("cannot open");
 }
 
-// Verify a signature against any sign key in an identity's rotation chain.
-async function verifyAgainstIdentity(doc, sig, payload) {
-  for (const k of identitySignKeys(doc)) {
-    const pub = await importSignPublic(k);
+// The validity window of every sign key the identity has used:
+//   from   : key became active (null for genesis = no lower bound)
+//   until  : key was rotated out (null for the current key = no upper bound)
+//   revoked: the rotation that retired it marked it compromised
+export function keyTimeline(doc) {
+  const rot = doc.rotations || [];
+  const keys = identitySignKeys(doc); // [genesis, ...rotation targets], length rot.length+1
+  return keys.map((pub, i) => ({
+    pub,
+    from: i === 0 ? null : rot[i - 1].created_at,
+    until: i < rot.length ? rot[i].created_at : null,
+    revoked: i < rot.length && rot[i].reason === "compromise",
+  }));
+}
+
+// Verify a signature made at `createdAt` against the identity, honoring each key's
+// validity window and revocation. A revoked (compromised) key never validates; a
+// gracefully-rotated key only validates for events dated before it was rotated out.
+async function verifyEventSig(doc, sig, payload, createdAt) {
+  const t = Date.parse(createdAt);
+  for (const k of keyTimeline(doc)) {
+    if (k.revoked) continue;
+    if (!Number.isNaN(t)) {
+      if (k.from && t < Date.parse(k.from)) continue;
+      if (k.until && t >= Date.parse(k.until)) continue;
+    }
+    const pub = await importSignPublic(k.pub);
     if (await verify(pub, sig, payload)) return true;
   }
   return false;
@@ -253,7 +281,7 @@ async function countApprovers(ev, directory, members) {
     if (!att || !att.by || !att.sig || approvers.has(att.by) || !authorized.has(att.by)) continue;
     const doc = directory && directory[att.by];
     if (!doc) continue;
-    if (await verifyAgainstIdentity(doc, att.sig, payload)) approvers.add(att.by);
+    if (await verifyEventSig(doc, att.sig, payload, ev.created_at)) approvers.add(att.by);
   }
   return approvers.size;
 }
@@ -286,7 +314,7 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   if (!author) {
     reasons.push("unknown-author");
   } else {
-    const good = await verifyAgainstIdentity(author, ev.sig, canonical(signedView(ev)));
+    const good = await verifyEventSig(author, ev.sig, canonical(signedView(ev)), ev.created_at);
     R(!good, "invalid-signature");
   }
 
