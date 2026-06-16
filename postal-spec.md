@@ -30,7 +30,7 @@ que la idea de "un archivo por evento".
   chats/<chat_id>/events/YYYY/MM/DD/<id>.json    # mensajes, recibos, cambios
 ```
 
-Un evento puede ser `kind`: `message`, `receipt` o `member`. El `id` es
+Un evento puede ser de cualquier `kind` (string firmado). Kinds **reservados** con semántica especial: `member` (gobernanza), `message` (sellado). Las apps definen los suyos (`task`, `claim`, `knowledge`...). El `id` es
 `<created_at con :. → ->_<from>_<rnd>`, así el **path es determinista** y verificable
 sin abrir el archivo.
 

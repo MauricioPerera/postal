@@ -400,7 +400,9 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 
   // 1. schema-lite: required shape
   R(!ev || ev.v !== VERSION, "bad-version");
-  R(!ev || !ev.kind || !["message", "receipt", "member", "knowledge", "skill", "tombstone"].includes(ev.kind), "bad-kind");
+  // Open kinds: any non-empty string is a valid signed record. Reserved kinds keep
+  // special semantics (member -> governance, message -> sealing); apps define their own.
+  R(!ev || typeof ev.kind !== "string" || !ev.kind.trim(), "bad-kind");
   R(!ev || !ev.from || !ev.chat_id || !ev.id || !ev.created_at, "missing-fields");
   R(ev && !Array.isArray(ev.to), "to-not-array");
   R(ev && Number.isNaN(Date.parse(ev.created_at || "")), "bad-date");

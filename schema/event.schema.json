@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "v": { "const": 1 },
-    "kind": { "enum": ["message", "receipt", "member", "knowledge", "skill", "tombstone"] },
+    "kind": { "type": "string", "minLength": 1, "description": "any signed-record kind; reserved: message, member" },
     "seq": { "type": "integer", "minimum": 0 },
     "prev": { "type": ["string", "null"] },
     "supersedes": { "type": ["string", "null"] },

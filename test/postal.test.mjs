@@ -82,5 +82,11 @@ badId.sig = ev.sig; // sig won't match anyway, but check the id rule fires
 const r6 = await verifyEvent(badId, { directory, members });
 ok("non-deterministic id rejected", !r6.ok && r6.reasons.includes("non-deterministic-id"));
 
+console.log("# open kinds (apps define their own)");
+const custom = await buildEvent(alice, { kind: "task", chat_id: "c1", to: [bob.id], created_at: "2026-06-16T20:30:00.000Z", rnd: "tsk1", body: { title: "do X" }, recipients });
+ok("an app-defined kind ('task') passes the gate", (await verifyEvent(custom, { directory, members })).ok);
+const emptyKind = { ...ev, kind: "" };
+ok("an empty kind is rejected", !(await verifyEvent(emptyKind, { directory, members })).ok);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
