@@ -25,8 +25,8 @@ que la idea de "un archivo por evento".
 .postal/
   protocol.json                                  # metadatos del protocolo
   users/<id>.json                                # identidad pública (auto-firmada)
-  chats/<chat_id>/meta.json                      # título, creador (firmado)
-  chats/<chat_id>/members.json                   # membresía + roles (firmado/quórum)
+  chats/<chat_id>/meta.json                      # creador + governance (FIRMADO)
+  chats/<chat_id>/members.json                   # caché derivada (se reconstruye por replay)
   chats/<chat_id>/events/YYYY/MM/DD/<id>.json    # mensajes, recibos, cambios
 ```
 
@@ -87,6 +87,29 @@ ventana `[activa_desde, retirada_en)` derivada de la cadena. Una firma solo vale
 - **Rotación con `reason:"compromise"`:** la clave vieja queda **revocada para todo**
   evento, incluso uno **backdated** — porque una clave comprometida pudo fabricar fechas
   falsas. Solo la clave nueva (actual) sigue válida.
+
+## 2.1 Meta del chat (`meta.json`, firmado)
+
+`meta.json` define el **owner génesis** (`created_by`) y la **política de gobernanza**
+(`governance`). Como el gate confía en esos dos campos, va **firmado por el creador** y el
+`chat_id` **ancla al creador**: `chat_id = c_<created_by>_<rnd>`. Así nadie puede forjar un
+meta con otro `created_by` para un chat ajeno.
+
+```json
+{
+  "v": 1, "id": "c_<owner>_<rnd>", "title": "Familia",
+  "created_by": "<owner id>", "created_at": "...",
+  "governance": { "set_role": 3 },
+  "sig": "<firma del owner sobre canonical(meta sin sig)>"
+}
+```
+
+`verifyChatMeta` (HARD): forma, `id` == nombre del directorio, `chat_id` contiene
+`created_by`, el creador existe en el directorio, y la firma valida (con ventana de clave).
+Probado (`test/meta.test.mjs`, 7/7): cambiar `created_by`, `governance` o `title` rompe la
+verificación; un `chat_id` que no embebe al creador se rechaza; un creador sí puede crear un
+chat bajo su propio id. El gate de CI toma `created_by`/`governance` **solo** de un meta que
+pase esta verificación.
 
 ## 3. Evento firmado (y, si es mensaje, sellado)
 
@@ -188,7 +211,7 @@ del autor.
 
 ## 7. Roadmap
 
-- Firma de `members.json`/`meta.json` (hoy `governance`/`created_by` se leen sin firma).
+- Firma de receipts y de eventos de membresía con doble propósito (auditoría externa).
 - Reducción de metadatos (ids opacos, padding) — investigación.
 - Cliente HTML de un archivo que hable el protocolo (identidad, rotación, huellas OOB,
   enviar/leer con gate).

@@ -3,7 +3,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createIdentity, publicIdentityDoc, buildEvent, eventPath, userPath } from "../src/postal.js";
+import { createIdentity, publicIdentityDoc, buildEvent, eventPath, userPath, buildChatMeta, newChatId, chatMetaPath } from "../src/postal.js";
 import { canonical, importSignPrivate, sign } from "../src/crypto.js";
 import { verifyRepo } from "../src/cli.js";
 
@@ -25,9 +25,9 @@ write(userPath(alice.id), await publicIdentityDoc(alice));
 write(userPath(bob.id), await publicIdentityDoc(bob));
 write(userPath(eve.id), await publicIdentityDoc(eve));
 
-const chat = "c1";
-// meta.json declares the genesis owner; membership is replayed from here.
-write(`.postal/chats/${chat}/meta.json`, { v: 1, id: chat, created_by: alice.id, created_at: "2026-06-16T19:59:00.000Z" });
+const chat = newChatId(alice.id, "demo");
+// meta.json is SIGNED by the genesis owner; membership is replayed from here.
+write(chatMetaPath(chat), await buildChatMeta(alice, { chat_id: chat, created_at: "2026-06-16T19:59:00.000Z" }));
 const recipients = [
   { id: alice.id, encPublicKey: alice.enc.publicKey },
   { id: bob.id, encPublicKey: bob.enc.publicKey },

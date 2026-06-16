@@ -11,7 +11,7 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { verifyIdentityDoc, verifyChat } from "./postal.js";
+import { verifyIdentityDoc, verifyChat, verifyChatMeta } from "./postal.js";
 
 function walk(dir) {
   if (!existsSync(dir)) return [];
@@ -48,9 +48,15 @@ export async function verifyRepo(repoRoot) {
 
   for (const chat of chats) {
     const meta = readJson(join(chatsDir, chat, "meta.json"));
-    const genesisOwner = meta && meta.created_by ? meta.created_by : undefined;
-    const governance = meta && meta.governance ? meta.governance : undefined;
-    if (!genesisOwner) failures.push({ path: `.postal/chats/${chat}/meta.json`, reasons: ["missing-genesis-owner"] });
+    // Trust created_by / governance ONLY from a meta.json that passes verification.
+    const metaVerdict = await verifyChatMeta(meta, { directory, chatId: chat });
+    let genesisOwner, governance;
+    if (metaVerdict.ok) {
+      genesisOwner = meta.created_by;
+      governance = meta.governance;
+    } else {
+      failures.push({ path: `.postal/chats/${chat}/meta.json`, reasons: metaVerdict.reasons });
+    }
 
     // Gather all events; membership is REPLAYED from genesis, not trusted from a snapshot.
     const items = [];

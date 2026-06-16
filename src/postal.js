@@ -129,6 +129,50 @@ export async function verifyIdentityDoc(doc) {
 
 export const fingerprintOf = (doc) => humanFingerprint(genesisSignPub(doc));
 
+// --- chat meta (signed: genesis owner + governance) --------------------------
+
+// A chat id embeds its creator, so a meta.json cannot be forged for someone else's
+// chat by swapping created_by. The gate enforces this binding.
+export const newChatId = (ownerId, rnd) => `c_${ownerId}_${rnd}`;
+export const chatMetaPath = (chatId) => `.postal/chats/${chatId}/meta.json`;
+
+// Build a signed meta.json. `created_by` is the genesis owner; `governance` (optional)
+// is the quorum policy. Signed by the owner's current key.
+export async function buildChatMeta(owner, { chat_id, title = "", created_at, governance }) {
+  const meta = {
+    v: VERSION,
+    id: chat_id,
+    title,
+    created_by: owner.id,
+    created_at: created_at || new Date().toISOString(),
+    ...(governance ? { governance } : {}),
+  };
+  const priv = await importSignPrivate(owner.sign.privateJwk);
+  meta.sig = await sign(priv, canonical(stripField(meta, "sig")));
+  return meta;
+}
+
+// Verify meta.json (HARD). Returns { ok, reasons }. The genesis owner and governance
+// policy used by the gate come ONLY from a meta that passes this check.
+export async function verifyChatMeta(meta, { directory, chatId } = {}) {
+  const reasons = [];
+  const R = (c, m) => { if (c) reasons.push(m); };
+  R(!meta || meta.v !== VERSION || !meta.id || !meta.created_by || !meta.created_at || !meta.sig, "bad-meta-shape");
+  if (reasons.length) return { ok: false, reasons };
+
+  R(chatId && meta.id !== chatId, "meta-id-mismatch");
+  R(!String(meta.id).includes(meta.created_by), "chat-id-not-bound-to-creator");
+
+  const creator = directory && directory[meta.created_by];
+  if (!creator) {
+    reasons.push("unknown-chat-creator");
+  } else {
+    const good = await verifyEventSig(creator, meta.sig, canonical(stripField(meta, "sig")), meta.created_at);
+    R(!good, "invalid-meta-signature");
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
 // --- events ------------------------------------------------------------------
 
 export function eventPath(chatId, ev) {
