@@ -43,7 +43,55 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
     return (d.tree || []).filter((e) => e.type === "blob" && e.path.indexOf(prefix) === 0).map((e) => e.path);
   }
 
-  return { owner, repo, branch, getFile, putFile, listTree };
+  // --- Git Data API: many files in ONE commit (for batching) -----------------
+
+  async function getHeadSha() {
+    const res = await req("GET", `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
+    if (!res.ok) throw await ghErr(res, "getRef");
+    return (await res.json()).object.sha;
+  }
+  async function getCommitTree(commitSha) {
+    const res = await req("GET", `/repos/${owner}/${repo}/git/commits/${commitSha}`);
+    if (!res.ok) throw await ghErr(res, "getCommit");
+    return (await res.json()).tree.sha;
+  }
+  async function createBlob(contentString) {
+    const res = await req("POST", `/repos/${owner}/${repo}/git/blobs`, { content: contentString, encoding: "utf-8" });
+    if (!res.ok) throw await ghErr(res, "createBlob");
+    return (await res.json()).sha;
+  }
+  async function createTree(baseTree, entries) {
+    const res = await req("POST", `/repos/${owner}/${repo}/git/trees`, { base_tree: baseTree, tree: entries });
+    if (!res.ok) throw await ghErr(res, "createTree");
+    return (await res.json()).sha;
+  }
+  async function createCommit(message, tree, parents) {
+    const res = await req("POST", `/repos/${owner}/${repo}/git/commits`, { message, tree, parents });
+    if (!res.ok) throw await ghErr(res, "createCommit");
+    return (await res.json()).sha;
+  }
+  async function updateRef(sha) {
+    const res = await req("PATCH", `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, { sha });
+    if (!res.ok) throw await ghErr(res, "updateRef");
+    return (await res.json()).object.sha;
+  }
+
+  // Commit several files atomically in ONE commit. files: [{ path, content }].
+  // Returns the new commit sha.
+  async function commitFiles(files, message) {
+    const head = await getHeadSha();
+    const baseTree = await getCommitTree(head);
+    const entries = [];
+    for (const f of files) {
+      entries.push({ path: f.path, mode: "100644", type: "blob", sha: await createBlob(f.content) });
+    }
+    const tree = await createTree(baseTree, entries);
+    const commit = await createCommit(message || `postal: batch ${files.length}`, tree, [head]);
+    await updateRef(commit);
+    return commit;
+  }
+
+  return { owner, repo, branch, getFile, putFile, listTree, commitFiles };
 }
 
 const enc = (p) => String(p).split("/").map(encodeURIComponent).join("/");

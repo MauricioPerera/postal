@@ -212,7 +212,7 @@ del autor.
 ## 7. Roadmap
 
 - Firma de receipts y de eventos de membresía con doble propósito (auditoría externa).
-- Modo privado avanzado: distribución de claves OOB, batching de commits para difuminar cadencia.
+- Modo privado avanzado: distribución de claves fuera de banda (no publicar en `users/`).
 - Cliente HTML de un archivo que hable el protocolo (identidad, rotación, huellas OOB,
   enviar/leer con gate).
 

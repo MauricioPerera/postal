@@ -65,3 +65,19 @@ Ocultar (1)–(6) requiere **cover traffic / mixnet / servidor** — y eso aband
   asumir que cadencia/volumen siguen siendo observables.
 - Para el ritmo de commits, lo único que ayuda sin servidor es **batching** (agrupar varios
   eventos por commit en horarios fijos) — reduce la resolución temporal, no la elimina.
+
+## Batching (implementado, `src/batch.js` — probado offline + en repo real)
+
+Mitiga el timing sin servidor:
+
+- **Outbox local**: los eventos se acumulan y se escriben **todos en UN commit** vía la Git
+  Data API (`commitFiles`). Verificado en `postal-test`: 3 eventos → 1 commit con 3 archivos,
+  un solo parent.
+- **Cuantización de tiempo**: `quantizeTime` redondea `created_at` (y el momento del flush) a
+  la frontera del período (p. ej. 10 min). El host ve una ráfaga de N eventos en la frontera,
+  no N timestamps reales.
+
+**Qué mejora:** la resolución temporal baja de "segundo exacto por mensaje" a "ventana de N
+minutos por lote", y los eventos del lote dejan de ser distinguibles por tiempo.
+**Qué sigue filtrando:** que hubo un lote, su tamaño (cuántos eventos en la ventana) y la
+cuenta que empujó. Es una mejora real de timing, no anonimato.
