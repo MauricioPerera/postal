@@ -78,17 +78,26 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
 
   // Commit several files atomically in ONE commit. files: [{ path, content }].
   // Returns the new commit sha.
+  //
+  // CONCURRENCY: postal is multi-writer (several members post at once). Two commits racing on the
+  // same HEAD make the loser's updateRef a non-fast-forward -> GitHub 422/409. We RETRY: re-read
+  // HEAD and rebuild the tree/commit on the new base, so concurrent appends serialize instead of
+  // failing. Blobs are content-addressed, so re-running createBlob on retry is cheap/idempotent.
+  // Honest limit: bounded retries (no infinite livelock); at very high write contention an append
+  // can still exhaust them and throw — fine at the "tens of members" scale this targets.
   async function commitFiles(files, message) {
-    const head = await getHeadSha();
-    const baseTree = await getCommitTree(head);
-    const entries = [];
-    for (const f of files) {
-      entries.push({ path: f.path, mode: "100644", type: "blob", sha: await createBlob(f.content) });
-    }
-    const tree = await createTree(baseTree, entries);
-    const commit = await createCommit(message || `postal: batch ${files.length}`, tree, [head]);
-    await updateRef(commit);
-    return commit;
+    return withRetry(async () => {
+      const head = await getHeadSha();
+      const baseTree = await getCommitTree(head);
+      const entries = [];
+      for (const f of files) {
+        entries.push({ path: f.path, mode: "100644", type: "blob", sha: await createBlob(f.content) });
+      }
+      const tree = await createTree(baseTree, entries);
+      const commit = await createCommit(message || `postal: batch ${files.length}`, tree, [head]);
+      await updateRef(commit);
+      return commit;
+    }, { retryable: isRefConflict });
   }
 
   // --- commit history (for git-anchored ordering, src/commit-order.js) -------
@@ -118,6 +127,28 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
   }
 
   return { owner, repo, branch, getFile, putFile, listTree, commitFiles, getHeadSha, listCommits, getCommitFiles };
+}
+
+// A non-fast-forward ref update (lost an optimistic-lock race) is what GitHub returns when two
+// commits raced the same HEAD: 422 (Git Data API) or 409 (Contents API). Only these are retried.
+export const isRefConflict = (e) => e && (e.status === 422 || e.status === 409);
+
+// Run `fn` with bounded retry + linear backoff PLUS jitter. Jitter is essential here: without it,
+// N racers that collide all re-read the same HEAD and retry in lockstep, colliding again forever;
+// a random spread desynchronizes them so they serialize. Retries only when `retryable(err)` is
+// true; any other error (auth, 404, ...) throws immediately. `sleep`/`rand` are injectable so
+// tests are deterministic.
+export async function withRetry(fn, { tries = 6, base = 150, retryable = () => true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), rand = Math.random } = {}) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(i); }
+    catch (e) {
+      last = e;
+      if (i === tries - 1 || !retryable(e)) throw e;
+      await sleep(base * (i + 1) + Math.floor(rand() * base));   // linear backoff + jitter [0,base)
+    }
+  }
+  throw last;
 }
 
 const enc = (p) => String(p).split("/").map(encodeURIComponent).join("/");
