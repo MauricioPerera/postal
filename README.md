@@ -14,7 +14,9 @@ Protocolo independiente. No hereda código previo, solo la idea de "un archivo p
 | Autenticidad | `signature: null` | **firma ECDSA en cada evento** |
 | Confidencialidad | texto en claro | **sellado por-destinatario** (ECDH P-256 + AES-256-GCM) |
 | Integridad | "shape mínimo" | **gate determinista** (esquema + firma + append-only) |
-| Gobernanza | ninguna | **quórum de atestaciones** (roadmap) |
+| Gobernanza | ninguna | **quórum de atestaciones** (multi-firma, implementado) |
+| Integridad de la historia | — | **hash-chain por autor** (orden + anti-borrado) |
+| Ciclo de vida de claves | — | **rotación + revocación** con ventana temporal |
 
 ## El contrato híbrido (CCDD)
 
@@ -28,16 +30,18 @@ rechaza el push inválido). Detalle: [`postal-spec.md`](postal-spec.md).
 ## Probarlo
 
 ```bash
-node test/postal.test.mjs    # 16 passed, 0 failed  (protocolo, offline)
+npm test    # 112 passed, 0 failed  (13 suites de protocolo, offline)
 
 # transporte real contra un repo privado de GitHub:
 GH_TOKEN=$(gh auth token) GH_OWNER=<owner> GH_REPO=<repo> node test/integration.test.mjs
 # 9 passed, 0 failed
 ```
 
-Cubre: identidad auto-firmada, anti-suplantación (id≠clave rechazado), mensaje
-firmado+sellado, apertura solo por destinatario, y el gate rechazando firma forjada,
-campo manipulado, autor no-miembro, autor desconocido, sobrescritura e id no determinista.
+Cubre (entre otros): identidad auto-firmada y anti-suplantación, mensaje firmado+sellado
+abierto solo por destinatario, rotación/revocación de claves, hash-chain (orden +
+anti-borrado), quórum de gobernanza, replay de membresía, meta firmado, CRUD por
+supersesión, modo privado y batching; y el gate rechazando firma forjada, campo
+manipulado, autor no-miembro, autor desconocido, sobrescritura e id no determinista.
 
 ## Transporte sobre git (verificado contra repo privado real)
 
@@ -72,13 +76,17 @@ mergearse — el modelo CCDD en el lado de escritura.
 
 ```
 postal-spec.md            contrato híbrido + layout + reglas del gate
+docs/                     metadata.md (privacidad) · knowledge-base.md (projector/RAG)
 schema/                   JSON Schema de identidad y evento (la parte dura)
-src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint
-src/postal.js             identidad, eventos firmados/sellados, verifyEvent + verifyChat (replay)
+src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint, sellado
+src/postal.js             identidad, rotación, eventos firmados/sellados, hash-chain,
+                          gobernanza, verifyEvent + verifyChat (gate, replay), CRUD
 src/github.js             transporte: Contents/Trees API (isomórfico)
 src/transport.js          protocolo-sobre-git: publish, post, poll (verify-on-read)
-test/postal.test.mjs      16 tests de protocolo (offline)
-test/integration.test.mjs 9 tests contra repo privado real
+src/projector.js          índice derivado (js-doc-store + js-vector-store) de lo verificado
+src/cli.js                gate como comando (verify) para CI
+vendor/                   js-doc-store + js-vector-store (MIT, vendored para el projector)
+test/                     13 suites, 112 tests offline + integration.test.mjs (9, repo real)
 ```
 
 ## Alcance honesto

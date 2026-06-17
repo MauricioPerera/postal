@@ -192,6 +192,15 @@ entrada (el `seq` manda).
 no se detecta desde dentro — no hay sucesor que los referencie. Cerrarlo requiere un
 **head firmado/checkpoint** publicado por el autor (roadmap).
 
+### Registros: modificar y borrar (`supersedes`)
+
+Un evento puede llevar `supersedes` (id del evento que reemplaza), firmado. Esto modela un
+**registro** mutable como cadena de versiones: **modificar** = añadir una versión que
+supersede a la anterior; **borrar** = un evento `tombstone` que supersede la cabeza (el dato
+sigue en git); **restaurar** = superseder al tombstone. El valor vigente es la cabeza no
+superseded; la resolución y la autorización (solo el autor original o un admin pueden
+superseder) son de capa de aplicación. Detalle: [`docs/knowledge-base.md`](docs/knowledge-base.md).
+
 ## 5. Gobernanza (quórum) — eventos `member`
 
 Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove` |
@@ -241,4 +250,5 @@ del autor.
 ## 8. Implementación de referencia
 
 `src/crypto.js` (primitivas), `src/postal.js` (identidad, eventos, gate),
-`test/postal.test.mjs` (16/16). Isomórfico: navegador + Node, solo WebCrypto.
+`test/postal.test.mjs` (18/18) + 12 suites más (112 tests offline). Isomórfico:
+navegador + Node, solo WebCrypto.
