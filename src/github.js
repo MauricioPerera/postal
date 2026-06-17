@@ -102,21 +102,29 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
 
   // --- commit history (for git-anchored ordering, src/commit-order.js) -------
 
-  // List commit shas on the branch, OLDEST-FIRST (so the array index is the commit order).
-  // Paginates the REST commits API. The list endpoint does NOT include per-commit files; use
-  // getCommitFiles(sha) for that.
-  async function listCommits({ perPage = 100, maxPages = 50 } = {}) {
-    const shas = [];
+  // Commit shas NEWER than `sinceSha`, OLDEST-FIRST (so they extend an existing index). Pages the
+  // commits API newest-first and stops as soon as it sees `sinceSha`. Returns
+  // { full, shas }: full=false means `shas` are just the new commits after sinceSha; full=true
+  // means sinceSha was null or NOT FOUND (history rewritten / first run) and `shas` is the WHOLE
+  // history oldest-first — the caller must rebuild from scratch.
+  async function commitsSince(sinceSha, { perPage = 100, maxPages = 50 } = {}) {
+    const acc = [];
     for (let page = 1; page <= maxPages; page++) {
       const res = await req("GET", `/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=${perPage}&page=${page}`);
       if (res.status === 404 || res.status === 409) break;            // empty repo / no commits
-      if (!res.ok) throw await ghErr(res, "listCommits");
+      if (!res.ok) throw await ghErr(res, "commitsSince");
       const batch = await res.json();
-      for (const c of batch) shas.push(c.sha);
-      if (batch.length < perPage) break;
+      for (const c of batch) {                                        // newest-first
+        if (sinceSha && c.sha === sinceSha) return { full: false, shas: acc.reverse() };
+        acc.push(c.sha);
+      }
+      if (batch.length < perPage) break;                             // reached the root commit
     }
-    return shas.reverse();                                            // oldest-first
+    return { full: true, shas: acc.reverse() };                       // sinceSha null/absent -> whole history
   }
+
+  // OLDEST-FIRST list of every commit sha (the array index is the commit order). Thin wrapper.
+  async function listCommits(opts) { return (await commitsSince(null, opts)).shas; }
 
   // Paths ADDED by a single commit (status "added"). One API call per commit.
   async function getCommitFiles(sha) {
@@ -126,7 +134,7 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
     return (d.files || []).filter((f) => f.status === "added").map((f) => f.filename);
   }
 
-  return { owner, repo, branch, getFile, putFile, listTree, commitFiles, getHeadSha, listCommits, getCommitFiles };
+  return { owner, repo, branch, getFile, putFile, listTree, commitFiles, getHeadSha, listCommits, commitsSince, getCommitFiles };
 }
 
 // A non-fast-forward ref update (lost an optimistic-lock race) is what GitHub returns when two

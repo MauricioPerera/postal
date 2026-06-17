@@ -54,26 +54,44 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
-console.log("# ghCommitIndex (hosted GitHub-API source) with a fake client");
-// Fake client: two commits, oldest-first sha0 adds a.json, sha1 adds b.json. listCommits returns
-// oldest-first (as the real one does after its internal reverse). Count calls to prove caching.
-let calls;
-const makeClient = (head) => ({
+console.log("# ghCommitIndex (hosted source) — INCREMENTAL cache with a fake client");
+// Fake repo model: an oldest-first commit list, each adding some paths. commitsSince(since)
+// returns only the commits AFTER `since` (or full history if since is null/absent).
+let calls, history;
+const client = {
   owner: "o", repo: "r",
-  getHeadSha: async () => { calls.headSha++; return head; },
-  listCommits: async () => { calls.listCommits++; return ["sha0", "sha1"]; },
-  getCommitFiles: async (sha) => { calls.getCommitFiles++; return sha === "sha0" ? ["a.json"] : ["b.json"]; },
-});
-calls = { headSha: 0, listCommits: 0, getCommitFiles: 0 };
-const gi = await ghCommitIndex(makeClient("HEAD1"));
-ok("maps added paths to commit ordinal (oldest=0)", gi.get("a.json") === 0 && gi.get("b.json") === 1);
-ok("walked every commit once", calls.getCommitFiles === 2 && calls.listCommits === 1);
-await ghCommitIndex(makeClient("HEAD1"));                          // same head -> cache hit
-ok("cache hit on unchanged HEAD: no re-walk", calls.listCommits === 1 && calls.getCommitFiles === 2);
-await ghCommitIndex(makeClient("HEAD2"));                          // new head -> re-walk
-ok("new HEAD invalidates cache: re-walks", calls.listCommits === 2 && calls.getCommitFiles === 4);
-const forced = await ghCommitIndex(makeClient("HEAD2"), { cache: false });
-ok("cache:false forces a walk", calls.listCommits === 3 && forced.get("b.json") === 1);
+  getHeadSha: async () => { calls.headSha++; return history.length ? history[history.length - 1].sha : "EMPTY"; },
+  commitsSince: async (since) => {
+    calls.commitsSince++;
+    const i = since == null ? -1 : history.findIndex((c) => c.sha === since);
+    if (since != null && i === -1) return { full: true, shas: history.map((c) => c.sha) };
+    if (since == null) return { full: true, shas: history.map((c) => c.sha) };
+    return { full: false, shas: history.slice(i + 1).map((c) => c.sha) };
+  },
+  getCommitFiles: async (sha) => { calls.getCommitFiles++; return (history.find((c) => c.sha === sha) || { files: [] }).files; },
+};
+calls = { headSha: 0, commitsSince: 0, getCommitFiles: 0 };
+history = [{ sha: "s0", files: ["a.json"] }, { sha: "s1", files: ["b.json"] }];
+const gi = await ghCommitIndex(client);
+ok("cold build maps paths to commit ordinal (oldest=0)", gi.get("a.json") === 0 && gi.get("b.json") === 1);
+ok("cold build walks every commit once", calls.getCommitFiles === 2);
+
+await ghCommitIndex(client);                                       // same HEAD -> early return
+ok("unchanged HEAD: no commitsSince, no re-walk", calls.commitsSince === 1 && calls.getCommitFiles === 2);
+
+history.push({ sha: "s2", files: ["c.json"] });                   // a new commit lands
+const gi2 = await ghCommitIndex(client);
+ok("new commit -> only the NEW commit is fetched (incremental)", calls.getCommitFiles === 3);
+ok("incremental index continues the ordinal (c.json=2)", gi2.get("c.json") === 2 && gi2.get("a.json") === 0);
+
+const forced = await ghCommitIndex(client, { cache: false });     // full rebuild
+ok("cache:false rebuilds the whole history", calls.getCommitFiles === 6 && forced.get("c.json") === 2);
+
+// History rewrite: cached head no longer exists -> commitsSince reports full -> rebuild from 0.
+calls = { headSha: 0, commitsSince: 0, getCommitFiles: 0 };
+history = [{ sha: "r0", files: ["x.json"] }, { sha: "r1", files: ["y.json"] }];
+const gi3 = await ghCommitIndex(client);
+ok("rewritten history (unknown cached head) rebuilds cleanly", gi3.get("x.json") === 0 && gi3.get("y.json") === 1 && !gi3.has("a.json"));
 
 console.log(`\n${p} passed, ${f} failed`);
 if (f) process.exit(1);

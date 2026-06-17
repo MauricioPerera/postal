@@ -234,11 +234,13 @@ commits introdujeron cada evento: `git log --reverse --diff-filter=A --name-only
 pega a los items antes del gate. Dos fuentes, una por transporte:
 `readLocalCommitIndex(dir)` corre git sobre un **clon local** (CLI / server con working copy;
 argv array, sin shell). `ghCommitIndex(client)` cubre el **transporte hosted vía GitHub API**
-(`src/github.js`, sin git local): camina los commits oldest-first y mapea cada path añadido a su
-ordinal de commit. Como la commits API no trae los archivos en el listado, cuesta O(commits)
-llamadas, así que **cachea por HEAD sha** — el walk corre una vez por commit nuevo y cada poll
-intermedio es un `getHeadSha()` + cache hit. Ambas devuelven el mismo `Map(path→índice)` que
-`attachCommitIndex` consume; las funciones puras son agnósticas al transporte. (A muy gran escala,
+(`src/github.js`, sin git local): mapea cada path añadido a su ordinal de commit. Como la commits
+API no trae los archivos en el listado, cuesta una llamada por commit, así que su caché es
+**incremental**: guarda `{head, count, byPath}` por repo y, ante un HEAD nuevo, pide vía
+`commitsSince` **solo los commits añadidos desde el head cacheado** y extiende el índice. Así un
+poll tras un post nuevo cuesta O(commits nuevos), no O(historial); el único walk O(total) es el
+arranque frío (primera lectura, o tras un rewrite de historia). Ambas fuentes devuelven el mismo
+`Map(path→índice)` que `attachCommitIndex` consume; las funciones puras son agnósticas al transporte. (A muy gran escala,
 preferir stamping en escritura sobre el walk.)
 
 **LÍMITE HONESTO (no es consenso).** El orden de commit lo controla quien commitea/pushea
