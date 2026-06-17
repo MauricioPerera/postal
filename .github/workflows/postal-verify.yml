@@ -20,4 +20,6 @@ jobs:
         with:
           node-version: "22"
       - name: Run postal gate
-        run: node tools/postal/cli.js verify
+        # The gate as a required-check. Runs against this repo's own .postal/ tree (the cli is
+        # at src/cli.js here; a DATA repo that vendors the cli would point at its own path).
+        run: node src/cli.js verify

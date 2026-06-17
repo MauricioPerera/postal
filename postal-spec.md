@@ -238,6 +238,29 @@ del autor.
 }
 ```
 
+## 5.1 Web-of-trust (atestaciones) — `src/trust.js`
+
+Distinto del quórum de §5 (que gobierna `members.json` *dentro* de un chat): el web-of-trust
+es una capa de **reputación** sobre eventos firmados, para decidir *en quién/qué confiar*
+(identidades, skills, datasets...). Eventos:
+
+- `attest`        `{ subject, claim, weight, expires }` — "el autor avala a `subject`".
+- `attest-revoke` `{ subject, claim }` — cancela un aval previo (gana el último por `created_at`).
+
+`resolveTrust(events, { roots, decay, maxDepth, now })` propaga confianza por **camino de
+máxima confianza** desde unas **raíces** ancladas fuera de banda, con **decaimiento
+multiplicativo** y profundidad acotada. Reglas fail-safe (probado en `test/trust.test.mjs`):
+
+- **expiración ON por defecto** (`now` = ahora si no se inyecta reloj);
+- **`weight` acotado a `[0,1]`** (un peso fuera de rango no puede invertir el decaimiento ni
+  superar la raíz; se clampa y se reporta);
+- **sin fail-silent**: bodies malformados se reportan en `invalid`, no se descartan callados.
+
+**Límite honesto:** es **reputación permisionada anclada a raíces**, no anti-Sybil ni
+consenso. Una clique de identidades falsas que se avalan entre sí obtiene **cero** confianza
+si ninguna raíz entra en ella; su garantía es "nadie no avalado por tus raíces gana
+confianza", no "los avales son objetivamente ciertos".
+
 ## 6. Non-goals / Threat model (qué Postal **no** protege)
 
 Esto **debe** leerse antes de confiar en Postal para confidencialidad:

@@ -30,7 +30,7 @@ rechaza el push inválido). Detalle: [`postal-spec.md`](postal-spec.md).
 ## Probarlo
 
 ```bash
-npm test    # 112 passed, 0 failed  (13 suites de protocolo, offline)
+npm test    # 118 passed, 0 failed  (14 suites de protocolo, offline)
 
 # transporte real contra un repo privado de GitHub:
 GH_TOKEN=$(gh auth token) GH_OWNER=<owner> GH_REPO=<repo> node test/integration.test.mjs
@@ -81,12 +81,15 @@ schema/                   JSON Schema de identidad y evento (la parte dura)
 src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint, sellado
 src/postal.js             identidad, rotación, eventos firmados/sellados, hash-chain,
                           gobernanza, verifyEvent + verifyChat (gate, replay), CRUD
+src/trust.js              web-of-trust compartido: attest/attest-revoke, resolveTrust (§5.1)
+src/private.js            modo privado: enrutado dentro del sobre (metadatos reducidos)
+src/batch.js              batching de commits + cuantización de tiempo (difumina la cadencia)
 src/github.js             transporte: Contents/Trees API (isomórfico)
 src/transport.js          protocolo-sobre-git: publish, post, poll (verify-on-read)
 src/projector.js          índice derivado (js-doc-store + js-vector-store) de lo verificado
 src/cli.js                gate como comando (verify) para CI
 vendor/                   js-doc-store + js-vector-store (MIT, vendored para el projector)
-test/                     13 suites, 112 tests offline + integration.test.mjs (9, repo real)
+test/                     14 suites, 118 tests offline + integration.test.mjs (9, repo real)
 ```
 
 ## Alcance honesto

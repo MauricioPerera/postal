@@ -148,11 +148,22 @@ export async function openSealed(sealed, id, encPrivateJwk, aad = "") {
 
 function padToBucket(n, bucket) { return Math.ceil((n + 1) / bucket) * bucket; }
 
-// Deterministic-ish shuffle driven by a seed byte stream (no Math.random).
-function shuffle(arr, seedBytes) {
+// Uniform random integer in [0, n) via rejection sampling — no modulo bias. Uses WebCrypto
+// randomness. (The previous version used `seed % (i+1)`, which biases when (i+1) ∤ 256 and
+// could partially correlate the real wrap's position with recipient order in anonymous mode.)
+function randInt(n) {
+  if (n <= 1) return 0;
+  const limit = Math.floor(256 / n) * n; // largest multiple of n that fits in a byte
+  let b;
+  do { b = randomBytes(1)[0]; } while (b >= limit);
+  return b % n;
+}
+
+// Unbiased Fisher–Yates shuffle (true randomness; the order need not be reproducible).
+function shuffle(arr) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
-    const j = seedBytes[(a.length - 1 - i) % seedBytes.length] % (i + 1);
+    const j = randInt(i + 1);
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
@@ -179,7 +190,7 @@ export async function sealAnonymous(plaintext, recipientPubs, aad = "", { keySlo
     wraps.push({ iv: bytesToBase64(randomBytes(IV_BYTES)), ct: bytesToBase64(randomBytes(48)) });
   }
 
-  return { alg: "ECDH-P256+AES-256-GCM/anon", epk: eph.publicKey, iv: body.iv, ct: body.ct, w: shuffle(wraps, eph.publicKey ? base64ToBytes(eph.publicKey) : new Uint8Array([1])) };
+  return { alg: "ECDH-P256+AES-256-GCM/anon", epk: eph.publicKey, iv: body.iv, ct: body.ct, w: shuffle(wraps) };
 }
 
 // Try every wrap until one yields the content key, then decrypt. Returns the
