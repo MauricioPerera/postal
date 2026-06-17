@@ -128,12 +128,16 @@ pase esta verificación.
 ```
 
 - **Firmar:** `sig = ECDSA(sign_priv, canonical(evento sin sig))`. **Canonicalización
-  (normativa):** la implementación de referencia usa claves ordenadas lexicográficamente,
-  recursiva, con `JSON.stringify` para primitivas. **No está fijada formalmente como JCS /
-  RFC 8785 todavía** — fijarlo (y añadir vectores cross-implementación) es roadmap; hasta
-  entonces, la verificación de firma es interoperable solo entre implementaciones que
-  compartan exactamente esta forma canónica. La canonicalización JSON es un *footgun* clásico
-  (orden de claves, unicode, números) — **ver caveat de revisión cripto en §6**.
+  (normativa): JCS — RFC 8785.** `canonical()` (`src/crypto.js`) implementa el esquema de
+  canonicalización JSON: claves ordenadas por **unidades de código UTF-16**, `JSON.stringify`
+  de ECMAScript para primitivas (que ES la serialización de strings y números de RFC 8785), sin
+  espacios insignificantes, y orden de array preservado. Probado contra vectores autoritativos
+  (`test/canonical.test.mjs`, 10/0): el vector de números de RFC 8785 §3.2.3, el escaping de
+  strings (formas cortas, `\uXXXX` en minúscula, UTF-8 literal) y la *gotcha* de ordenamiento
+  UTF-16 (un par suplente ordena antes que un BMP en U+E000). Como la forma canónica **no cambió**
+  (la implementación de referencia ya era conforme), fijarla es **no-breaking**: las firmas
+  existentes siguen válidas. La verificación de firma es interoperable con **cualquier**
+  implementación JCS conforme. (Vectores cross-implementación de la suite de referencia: roadmap.)
 - **Sellar (solo `message`):** el cuerpo se cifra con clave de contenido AES-256-GCM,
   envuelta por-destinatario vía ECDH **efímero-estático** (clave efímera del emisor por
   mensaje, clave **estática** del destinatario). AAD = metadatos del evento → el sobre no
@@ -313,8 +317,9 @@ Esto **debe** leerse antes de confiar en Postal para confidencialidad:
   **destinatario es estática** y se conserva en `encHistory` a través de rotaciones. Si una
   clave de cifrado (actual o vieja) se filtra, **se lee todo el historial sellado a ella**. La
   rotación protege hacia adelante, no hacia atrás. No hay ratchet/PFS.
-- **Canonicalización de firma no fijada.** Ver §3: aún no es JCS/RFC 8785; interop de firma y
-  hash solo garantizada dentro de la misma implementación de `canonical()`.
+- **Canonicalización: fijada como JCS / RFC 8785** (ver §3, `test/canonical.test.mjs` 10/0). La
+  interop de firma/hash está garantizada con cualquier implementación JCS conforme. (Pendiente
+  menor: correr la suite de vectores cross-implementación de referencia.)
 - **Necesita revisión cripto externa.** La composición (canonicalización, nonces GCM, cadena
   de rotación, ECDH efímero-estático) **no ha sido auditada por un criptógrafo**. Los tests
   verdes cubren ataques **conocidos**; no garantizan la ausencia de los desconocidos. **No
@@ -328,7 +333,8 @@ Esto **debe** leerse antes de confiar en Postal para confidencialidad:
 
 ## 7. Roadmap
 
-- **Fijar la canonicalización** como JCS / RFC 8785 + vectores de prueba cross-implementación.
+- ~~Fijar la canonicalización como JCS / RFC 8785~~ **hecho** (§3, `test/canonical.test.mjs`); resta
+  correr la suite de vectores cross-implementación de referencia.
 - **Revisión criptográfica externa** de toda la composición antes de uso en producción.
 - Forward secrecy (ratchet) para el sellado, si se quiere PFS real.
 - Firma de receipts y de eventos de membresía con doble propósito (auditoría externa).
