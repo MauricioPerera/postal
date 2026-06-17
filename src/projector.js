@@ -70,7 +70,9 @@ function resolveRecords(verifiedEvents, members) {
   return records;
 }
 
-// Map a verified event to a derived, provenance-carrying index doc.
+// Map an event to a provenance-carrying index doc. Does NOT assert `verified` — that flag
+// is set by project() from the actual gate result (issue postal#1 / skills#1), so it can
+// never be a false constant on a future path that indexes without verifying.
 function toDoc(ev) {
   const b = ev.body || {};
   if (ev.kind === "knowledge") {
@@ -78,7 +80,7 @@ function toDoc(ev) {
       _id: ev.id, kind: "knowledge",
       key: String(b.key || ""), value: String(b.value || ""), tags: b.tags || [],
       publisher: ev.from, seq: ev.seq ?? null, created_at: ev.created_at,
-      event_id: ev.id, verified: true,
+      event_id: ev.id,
     };
   }
   if (ev.kind === "skill") {
@@ -88,7 +90,7 @@ function toDoc(ev) {
       description: String(b.description || ""), version: String(b.version || ""),
       tags: b.tags || [],
       publisher: ev.from, seq: ev.seq ?? null, created_at: ev.created_at,
-      event_id: ev.id, verified: true,
+      event_id: ev.id,
     };
   }
   return null; // other kinds (message/member/...) are not indexed
@@ -124,6 +126,7 @@ export function makeProjector({ db, embed = localEmbed, dim = EMBED_DIM } = {}) 
       const rejected = failedPaths.size;
       // Resolve records (supersession + tombstones + authorization) over verified events.
       const verified = items.filter((it) => it.event && !failedPaths.has(it.path)).map((it) => it.event);
+      const verifiedIds = new Set(verified.map((e) => e.id)); // gate-derived truth set
       const records = resolveRecords(verified, result.members);
 
       let indexed = 0, deleted = 0;
@@ -131,10 +134,11 @@ export function makeProjector({ db, embed = localEmbed, dim = EMBED_DIM } = {}) 
         if (rec.error || rec.deleted) { if (rec.deleted) deleted++; continue; } // tombstoned / broken
         const doc = toDoc(rec.head);
         if (!doc) continue;
+        doc.verified = verifiedIds.has(doc.event_id); // consequence of the gate, not a constant
         col.insert(doc);
         vstore.set(VCOL, doc._id, embedText(doc), {
           key: doc.key, kind: doc.kind, publisher: doc.publisher,
-          event_id: doc.event_id, verified: true,
+          event_id: doc.event_id, verified: doc.verified,
           value: doc.value, name: doc.name, description: doc.description,
         });
         indexed++;

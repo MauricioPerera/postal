@@ -127,11 +127,19 @@ pase esta verificación.
 }
 ```
 
-- **Firmar:** `sig = ECDSA(sign_priv, canonical(evento sin sig))`. La serialización
-  canónica (claves ordenadas, recursiva) garantiza bytes idénticos para objetos iguales.
+- **Firmar:** `sig = ECDSA(sign_priv, canonical(evento sin sig))`. **Canonicalización
+  (normativa):** la implementación de referencia usa claves ordenadas lexicográficamente,
+  recursiva, con `JSON.stringify` para primitivas. **No está fijada formalmente como JCS /
+  RFC 8785 todavía** — fijarlo (y añadir vectores cross-implementación) es roadmap; hasta
+  entonces, la verificación de firma es interoperable solo entre implementaciones que
+  compartan exactamente esta forma canónica. La canonicalización JSON es un *footgun* clásico
+  (orden de claves, unicode, números) — **ver caveat de revisión cripto en §6**.
 - **Sellar (solo `message`):** el cuerpo se cifra con clave de contenido AES-256-GCM,
-  envuelta por-destinatario vía ECDH efímero (forward secrecy). AAD = metadatos del
-  evento → el sobre no puede reubicarse a otro evento/chat.
+  envuelta por-destinatario vía ECDH **efímero-estático** (clave efímera del emisor por
+  mensaje, clave **estática** del destinatario). AAD = metadatos del evento → el sobre no
+  puede reubicarse a otro evento/chat. **No hay forward secrecy** respecto al destinatario:
+  si su clave de cifrado (actual o en `encHistory`) se filtra, **se lee todo el historial
+  sellado a ella** (ver §6).
 - **Orden:** se **sella y luego se firma**: la firma cubre el ciphertext + metadatos.
   Cualquiera verifica la firma (público); solo los destinatarios abren el sobre.
 
@@ -230,17 +238,36 @@ del autor.
 }
 ```
 
-## 6. Alcance honesto (qué Postal **no** hace)
+## 6. Non-goals / Threat model (qué Postal **no** protege)
 
-- **Metadatos expuestos.** `from`/`to`/`created_at` y la estructura de paths son visibles
-  para quien tenga acceso al repo. Postal cifra el *contenido*, no el *grafo social*.
+Esto **debe** leerse antes de confiar en Postal para confidencialidad:
+
+- **Metadatos en claro.** `from`, `to`, `chat_id`, `created_at`, `kind` y el **path del
+  archivo** quedan en texto plano en git. El **grafo social** (quién habla con quién, cuándo,
+  cuánto) es observable por cualquiera con acceso al repo. Postal oculta el *qué*, no el
+  *quién/cuándo*. *(El "modo privado" reduce esto pero no lo elimina — ver `docs/metadata.md`.)*
+- **Sin forward secrecy.** El sellado usa ECDH efímero-estático: la clave de cifrado del
+  **destinatario es estática** y se conserva en `encHistory` a través de rotaciones. Si una
+  clave de cifrado (actual o vieja) se filtra, **se lee todo el historial sellado a ella**. La
+  rotación protege hacia adelante, no hacia atrás. No hay ratchet/PFS.
+- **Canonicalización de firma no fijada.** Ver §3: aún no es JCS/RFC 8785; interop de firma y
+  hash solo garantizada dentro de la misma implementación de `canonical()`.
+- **Necesita revisión cripto externa.** La composición (canonicalización, nonces GCM, cadena
+  de rotación, ECDH efímero-estático) **no ha sido auditada por un criptógrafo**. Los tests
+  verdes cubren ataques **conocidos**; no garantizan la ausencia de los desconocidos. **No
+  uses esto para confidencialidad real hasta una revisión externa.**
 - **Distribución inicial de clave.** Confiar en una huella sigue siendo decisión humana OOB.
 - **Modelo de escritura de git.** Cualquiera con write puede empujar; el enforcement real
   es branch-protection+Action (servidor) o verify-on-read (cliente). Elige según tu riesgo.
 - **Veracidad del contenido.** Firmar prueba *quién* lo dijo, no *si es cierto*.
+- **Contención adversaria por tiempo.** `created_at` lo fija el autor; ordenar "primero" entre
+  autores no es seguro contra antedatado (ver `postal-coordination`).
 
 ## 7. Roadmap
 
+- **Fijar la canonicalización** como JCS / RFC 8785 + vectores de prueba cross-implementación.
+- **Revisión criptográfica externa** de toda la composición antes de uso en producción.
+- Forward secrecy (ratchet) para el sellado, si se quiere PFS real.
 - Firma de receipts y de eventos de membresía con doble propósito (auditoría externa).
 - Head firmado / checkpoint por autor: detectar truncación de la cola del hash-chain.
 - Modo privado avanzado: distribución de claves fuera de banda (no publicar en `users/`).
