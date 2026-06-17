@@ -60,24 +60,32 @@ export async function readLocalCommitIndex(dir) {
 }
 
 // Hosted (GitHub-API) source of commitIndex — for the live transport that has NO local git.
-// Walks commits oldest-first and maps each ADDED path to its commit ordinal (first add wins).
+// Maps each ADDED path to the ordinal of the commit that introduced it (first add wins).
 //
-// COST: O(commits) API calls (one getCommitFiles per commit), because the list endpoint omits
-// per-commit files. So results are CACHED by HEAD sha: the walk runs once per new commit; every
-// poll in between is a single getHeadSha() and a cache hit. Pass `cache: false` to force a walk.
-// Fine at "tens of members" scale; for very large histories prefer write-time stamping.
-const _ghCache = new Map();                                  // `${owner}/${repo}@${headSha}` -> Map(path->idx)
+// COST: one getCommitFiles per commit (the list endpoint omits files). To keep READS from scaling
+// with history, the cache is INCREMENTAL: it keeps { head, count, byPath } per repo and, on a new
+// HEAD, fetches ONLY the commits added since the cached head (client.commitsSince) and extends the
+// index. So a poll after a new post costs O(new commits), not O(whole history). The only O(total)
+// walk is the cold start (first read, or after a history rewrite -> commitsSince reports full).
+// Pass `cache: false` to force a full rebuild. Fine at "tens" scale; to also kill the cold walk,
+// stamp order at write time.
+const _ghCache = new Map();                                  // `${owner}/${repo}` -> { head, count, byPath }
 export async function ghCommitIndex(client, { cache = true } = {}) {
+  const repoKey = `${client.owner}/${client.repo}`;
   const head = await client.getHeadSha();
-  const key = `${client.owner}/${client.repo}@${head}`;
-  if (cache && _ghCache.has(key)) return _ghCache.get(key);
-  const shas = await client.listCommits();                   // oldest-first
-  const byPath = new Map();
+  const prev = cache ? _ghCache.get(repoKey) : null;
+  if (prev && prev.head === head) return prev.byPath;        // nothing new since last read
+
+  const byPath = prev ? new Map(prev.byPath) : new Map();    // start from the cached index (or empty)
+  const { full, shas } = await client.commitsSince(prev ? prev.head : null);
+  let base = prev ? prev.count : 0;
+  if (full) { byPath.clear(); base = 0; }                    // history rewritten / first run -> rebuild
   for (let i = 0; i < shas.length; i++) {
     for (const path of await client.getCommitFiles(shas[i])) {
-      if (!byPath.has(path)) byPath.set(path, i);
+      if (!byPath.has(path)) byPath.set(path, base + i);
     }
   }
-  if (cache) { _ghCache.clear(); _ghCache.set(key, byPath); }  // keep only the current head
+  const count = base + shas.length;
+  if (cache) _ghCache.set(repoKey, { head, count, byPath });
   return byPath;
 }
