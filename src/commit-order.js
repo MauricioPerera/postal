@@ -58,3 +58,26 @@ export async function readLocalCommitIndex(dir) {
   }
   return parseCommitAdds(out);
 }
+
+// Hosted (GitHub-API) source of commitIndex — for the live transport that has NO local git.
+// Walks commits oldest-first and maps each ADDED path to its commit ordinal (first add wins).
+//
+// COST: O(commits) API calls (one getCommitFiles per commit), because the list endpoint omits
+// per-commit files. So results are CACHED by HEAD sha: the walk runs once per new commit; every
+// poll in between is a single getHeadSha() and a cache hit. Pass `cache: false` to force a walk.
+// Fine at "tens of members" scale; for very large histories prefer write-time stamping.
+const _ghCache = new Map();                                  // `${owner}/${repo}@${headSha}` -> Map(path->idx)
+export async function ghCommitIndex(client, { cache = true } = {}) {
+  const head = await client.getHeadSha();
+  const key = `${client.owner}/${client.repo}@${head}`;
+  if (cache && _ghCache.has(key)) return _ghCache.get(key);
+  const shas = await client.listCommits();                   // oldest-first
+  const byPath = new Map();
+  for (let i = 0; i < shas.length; i++) {
+    for (const path of await client.getCommitFiles(shas[i])) {
+      if (!byPath.has(path)) byPath.set(path, i);
+    }
+  }
+  if (cache) { _ghCache.clear(); _ghCache.set(key, byPath); }  // keep only the current head
+  return byPath;
+}

@@ -91,7 +91,33 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
     return commit;
   }
 
-  return { owner, repo, branch, getFile, putFile, listTree, commitFiles };
+  // --- commit history (for git-anchored ordering, src/commit-order.js) -------
+
+  // List commit shas on the branch, OLDEST-FIRST (so the array index is the commit order).
+  // Paginates the REST commits API. The list endpoint does NOT include per-commit files; use
+  // getCommitFiles(sha) for that.
+  async function listCommits({ perPage = 100, maxPages = 50 } = {}) {
+    const shas = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await req("GET", `/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=${perPage}&page=${page}`);
+      if (res.status === 404 || res.status === 409) break;            // empty repo / no commits
+      if (!res.ok) throw await ghErr(res, "listCommits");
+      const batch = await res.json();
+      for (const c of batch) shas.push(c.sha);
+      if (batch.length < perPage) break;
+    }
+    return shas.reverse();                                            // oldest-first
+  }
+
+  // Paths ADDED by a single commit (status "added"). One API call per commit.
+  async function getCommitFiles(sha) {
+    const res = await req("GET", `/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`);
+    if (!res.ok) throw await ghErr(res, "getCommitFiles " + sha);
+    const d = await res.json();
+    return (d.files || []).filter((f) => f.status === "added").map((f) => f.filename);
+  }
+
+  return { owner, repo, branch, getFile, putFile, listTree, commitFiles, getHeadSha, listCommits, getCommitFiles };
 }
 
 const enc = (p) => String(p).split("/").map(encodeURIComponent).join("/");

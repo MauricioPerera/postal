@@ -231,11 +231,15 @@ deben usar las capas de aplicación (en vez de ordenar por `created_at` cada una
 módulo lo *produce* desde el único lugar que el firmante no controla — el orden en que los
 commits introdujeron cada evento: `git log --reverse --diff-filter=A --name-only` →
 `parseCommitAdds` mapea `path → índice de commit`, y `attachCommitIndex(items, mapa)` lo
-pega a los items antes del gate. `readLocalCommitIndex(dir)` corre git sobre un **clon local**
-(CLI / server con working copy; argv array, sin shell). **Frontera de transporte honesta:** el
-transporte hosted vía GitHub API (`src/github.js`) no tiene git local — anclar ESE camino pide
-un adaptador paralelo sobre la commits API; hasta entonces el live hosted cae a `created_at` e
-`isCommitAnchored` reporta `false`. Las funciones puras son agnósticas al transporte.
+pega a los items antes del gate. Dos fuentes, una por transporte:
+`readLocalCommitIndex(dir)` corre git sobre un **clon local** (CLI / server con working copy;
+argv array, sin shell). `ghCommitIndex(client)` cubre el **transporte hosted vía GitHub API**
+(`src/github.js`, sin git local): camina los commits oldest-first y mapea cada path añadido a su
+ordinal de commit. Como la commits API no trae los archivos en el listado, cuesta O(commits)
+llamadas, así que **cachea por HEAD sha** — el walk corre una vez por commit nuevo y cada poll
+intermedio es un `getHeadSha()` + cache hit. Ambas devuelven el mismo `Map(path→índice)` que
+`attachCommitIndex` consume; las funciones puras son agnósticas al transporte. (A muy gran escala,
+preferir stamping en escritura sobre el walk.)
 
 **LÍMITE HONESTO (no es consenso).** El orden de commit lo controla quien commitea/pushea
 (`git commit --date`, rebase, orden de merge). **Sube la barra** sobre el `created_at` libre,
