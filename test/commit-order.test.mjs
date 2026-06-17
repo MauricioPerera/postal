@@ -1,5 +1,5 @@
 // Tests for the git-backed commitIndex source (src/commit-order.js).
-import { parseCommitAdds, attachCommitIndex, readLocalCommitIndex } from "../src/commit-order.js";
+import { parseCommitAdds, attachCommitIndex, readLocalCommitIndex, ghCommitIndex } from "../src/commit-order.js";
 import { canonicalOrder } from "../src/order.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -53,6 +53,27 @@ try {
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
+
+console.log("# ghCommitIndex (hosted GitHub-API source) with a fake client");
+// Fake client: two commits, oldest-first sha0 adds a.json, sha1 adds b.json. listCommits returns
+// oldest-first (as the real one does after its internal reverse). Count calls to prove caching.
+let calls;
+const makeClient = (head) => ({
+  owner: "o", repo: "r",
+  getHeadSha: async () => { calls.headSha++; return head; },
+  listCommits: async () => { calls.listCommits++; return ["sha0", "sha1"]; },
+  getCommitFiles: async (sha) => { calls.getCommitFiles++; return sha === "sha0" ? ["a.json"] : ["b.json"]; },
+});
+calls = { headSha: 0, listCommits: 0, getCommitFiles: 0 };
+const gi = await ghCommitIndex(makeClient("HEAD1"));
+ok("maps added paths to commit ordinal (oldest=0)", gi.get("a.json") === 0 && gi.get("b.json") === 1);
+ok("walked every commit once", calls.getCommitFiles === 2 && calls.listCommits === 1);
+await ghCommitIndex(makeClient("HEAD1"));                          // same head -> cache hit
+ok("cache hit on unchanged HEAD: no re-walk", calls.listCommits === 1 && calls.getCommitFiles === 2);
+await ghCommitIndex(makeClient("HEAD2"));                          // new head -> re-walk
+ok("new HEAD invalidates cache: re-walks", calls.listCommits === 2 && calls.getCommitFiles === 4);
+const forced = await ghCommitIndex(makeClient("HEAD2"), { cache: false });
+ok("cache:false forces a walk", calls.listCommits === 3 && forced.get("b.json") === 1);
 
 console.log(`\n${p} passed, ${f} failed`);
 if (f) process.exit(1);
