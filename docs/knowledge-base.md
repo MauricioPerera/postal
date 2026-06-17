@@ -55,9 +55,20 @@ es una **proyección** de la cadena de versiones válidas.
 
 ## Frontera de confianza (importante)
 
-`js-doc-store` **no verifica firmas**. Si indexas archivos crudos, indexas veneno. Por eso
-el projector **solo** ingiere eventos que pasaron `verifyChat`. El índice es una **caché
-derivada y desechable**; la confianza vive en Postal y se reconstruye desde git.
+`js-doc-store` y `js-vector-store` **no verifican firmas** ni deciden confianza: son store
+puro. Si indexas archivos crudos, indexas veneno. Por eso el projector **solo** ingiere
+eventos que pasaron `verifyChat`. El índice es una **caché derivada y desechable**; la
+confianza vive en Postal y se reconstruye desde git.
+
+> **Auditoría de la frontera (fuente, no afirmación).** Se verificó contra el árbol de ambas
+> dependencias vendored que ninguna verifica firmas ni ejecuta código desde datos (sin
+> `eval`/`Function`/`$where`). Dos *caveats genéricos* para consumidores que vayan **más allá
+> del uso de Postal** (Postal no los toca):
+> - **js-doc-store**: el operador `$regex` compila `new RegExp(value)` → posible ReDoS si una
+>   app pasa input **no confiable** a un `$regex`. El projector usa `$text`/igualdad, no esto.
+> - **js-vector-store**: la clase **`Reranker`** (opt-in) hace `fetch` a una API externa,
+>   enviándole el texto del query y de los candidatos. Para datos sensibles es una fuga hacia
+>   ese proveedor. El projector **no** instancia `Reranker` ni hace red (todo en memoria).
 
 ## Para skills
 
