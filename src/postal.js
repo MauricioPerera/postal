@@ -12,6 +12,7 @@ import {
   importSignPublic, importSignPrivate, sign, verify,
   sealForRecipients, openSealed,
 } from "./crypto.js";
+import { canonicalOrder } from "./order.js";
 
 export const VERSION = 1;
 export const MARKER = "POSTAL1:";
@@ -462,11 +463,9 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 //
 // items: [{ path, event }]. Returns { ok, members, results:[{path,verdict}], failures }.
 export async function verifyChat(items, { directory, genesisOwner, governance } = {}) {
-  const sorted = [...items].filter((it) => it && it.event).sort((a, b) => {
-    const ta = String(a.event.created_at || ""), tb = String(b.event.created_at || "");
-    if (ta !== tb) return ta < tb ? -1 : 1;
-    return String(a.event.id || "") < String(b.event.id || "") ? -1 : 1;
-  });
+  // Canonical cross-author order: commit-anchored when a git reader attached `commitIndex`,
+  // else created_at+id (identical to the historical behavior). See order.js.
+  const sorted = canonicalOrder(items.filter((it) => it && it.event));
 
   let members = genesisOwner ? [{ id: genesisOwner, role: "owner" }] : null;
   const seenPaths = new Set();
