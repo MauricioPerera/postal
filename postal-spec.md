@@ -209,6 +209,30 @@ sigue en git); **restaurar** = superseder al tombstone. El valor vigente es la c
 superseded; la resolución y la autorización (solo el autor original o un admin pueden
 superseder) son de capa de aplicación. Detalle: [`docs/knowledge-base.md`](docs/knowledge-base.md).
 
+## 4.3 Orden CROSS-author (`src/order.js`)
+
+El hash-chain (§4.2) fija el orden **dentro de un autor** sin depender del tiempo. El orden
+**entre autores distintos** es otra cosa: el único campo común es `created_at`, y es
+**auto-aseverado** — un miembro puede antedatarlo (dentro de la ventana de su clave) para
+colarse al frente. Eso afecta a "el primer claim gana", al trail de auditoría y al historial
+de chat.
+
+`canonicalOrder(items)` define el orden canónico cross-author y es **la única fuente** que
+deben usar las capas de aplicación (en vez de ordenar por `created_at` cada una):
+
+- Si un lector respaldado por git adjunta `commitIndex` (la posición del commit que introdujo
+  el evento), ordena por él. `commitIndex` **no es un campo dentro del JSON firmado** → el
+  firmante no lo controla con `created_at`.
+- Si no hay `commitIndex` (transporte en vivo, sin git), cae a `created_at` + `id` — el
+  comportamiento histórico. `isCommitAnchored(items)` dice si el orden está anclado a commit
+  o cayó al tiempo auto-aseverado, para que la app no sobrevenda la garantía.
+
+**LÍMITE HONESTO (no es consenso).** El orden de commit lo controla quien commitea/pushea
+(`git commit --date`, rebase, orden de merge). **Sube la barra** sobre el `created_at` libre,
+pero el orden total cross-author **sin un secuenciador de confianza sigue siendo anclado al
+operador, no Bizantino-seguro.** Por eso "el primer claim gana" y "historial permanente
+ordenado" son **mitigados y anclados a la historia del repo**, no garantías absolutas.
+
 ## 5. Gobernanza (quórum) — eventos `member`
 
 Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove` |
