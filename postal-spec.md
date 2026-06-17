@@ -227,6 +227,16 @@ deben usar las capas de aplicación (en vez de ordenar por `created_at` cada una
   comportamiento histórico. `isCommitAnchored(items)` dice si el orden está anclado a commit
   o cayó al tiempo auto-aseverado, para que la app no sobrevenda la garantía.
 
+**La FUENTE de `commitIndex`** (`src/commit-order.js`). `canonicalOrder` lo *consume*; este
+módulo lo *produce* desde el único lugar que el firmante no controla — el orden en que los
+commits introdujeron cada evento: `git log --reverse --diff-filter=A --name-only` →
+`parseCommitAdds` mapea `path → índice de commit`, y `attachCommitIndex(items, mapa)` lo
+pega a los items antes del gate. `readLocalCommitIndex(dir)` corre git sobre un **clon local**
+(CLI / server con working copy; argv array, sin shell). **Frontera de transporte honesta:** el
+transporte hosted vía GitHub API (`src/github.js`) no tiene git local — anclar ESE camino pide
+un adaptador paralelo sobre la commits API; hasta entonces el live hosted cae a `created_at` e
+`isCommitAnchored` reporta `false`. Las funciones puras son agnósticas al transporte.
+
 **LÍMITE HONESTO (no es consenso).** El orden de commit lo controla quien commitea/pushea
 (`git commit --date`, rebase, orden de merge). **Sube la barra** sobre el `created_at` libre,
 pero el orden total cross-author **sin un secuenciador de confianza sigue siendo anclado al
