@@ -40,6 +40,10 @@ export function ghClient({ owner, repo, token, branch = "main" }) {
     if (res.status === 404 || res.status === 409) return [];
     if (!res.ok) throw await ghErr(res, "listTree");
     const d = await res.json();
+    // GitHub truncates the tree for very large repos. Returning a partial list would SILENTLY drop
+    // events from a read (e.g. readChat), so fail loud: the repo outgrew this single-request read
+    // path and needs a paginated/sharded reader.
+    if (d.truncated) throw new Error("listTree: git tree truncated (repo too large for a single-request read)");
     return (d.tree || []).filter((e) => e.type === "blob" && e.path.indexOf(prefix) === 0).map((e) => e.path);
   }
 
