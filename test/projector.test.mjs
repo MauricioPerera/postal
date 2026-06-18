@@ -66,5 +66,24 @@ rep = await proj.project(items, { directory: dir2, genesisOwner: alice.id });
 ok("revoked publisher's knowledge is gone after reprojection", proj.byPublisher(bob.id).length === 0);
 ok("trusted publisher's knowledge remains", proj.byPublisher(alice.id).length === 1);
 
+console.log("# a key is namespaced per author: a foreign member cannot seize/shadow it by backdating");
+const chat2 = "c_" + alice.id + "_kb2";
+const chain2 = chainState();
+const item2 = (ev) => ({ path: eventPath(chat2, ev), event: ev });
+async function kn2(who, key, value, when) {
+  const { seq, prev } = chain2.next(who.id, chat2);
+  const ev = await buildEvent(who, { kind: "knowledge", chat_id: chat2, created_at: when, rnd: "n" + key + seq, body: { key, value }, seq, prev });
+  await chain2.record(ev); return item2(ev);
+}
+const addBob2 = item2(await buildMemberEvent(alice, { chat_id: chat2, created_at: "2026-06-16T19:00:00.000Z", rnd: "addb2", op: "add", target: bob.id, role: "member" }));
+const aliceOwned = await kn2(alice, "shared", "alice-value", "2026-06-16T22:00:00.000Z");
+const bobEarlier = await kn2(bob, "shared", "bob-earlier-dated", "2026-06-16T19:15:00.000Z"); // earlier -> smaller id
+const proj2 = makeProjector();
+await proj2.project([addBob2, aliceOwned, bobEarlier], { directory, genesisOwner: alice.id });
+const shared = proj2.findByKey("shared");
+ok("both authors keep their own record for the same key (no shadowing)", shared.length === 2);
+ok("alice's record survives (not seized by bob's earlier-dated one)",
+  shared.some((d) => d.publisher === alice.id && d.value === "alice-value"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
