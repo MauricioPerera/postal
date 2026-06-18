@@ -475,9 +475,10 @@ export async function verifyChat(items, { directory, genesisOwner, governance } 
   for (const it of sorted) {
     const ev = it.event;
     const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
-    seenPaths.add(eventPath(ev.chat_id, ev));
     results.push({ path: it.path, verdict });
     if (!verdict.ok) { failures.push({ path: it.path, reasons: verdict.reasons }); continue; }
+    seenPaths.add(eventPath(ev.chat_id, ev));   // only a VALID event reserves its path: an invalid
+    // event must NOT poison the path, or a forgery with a real event's id would suppress the real one.
     if (ev.kind === "member" && members) members = applyMemberEvent(members, ev);
   }
 

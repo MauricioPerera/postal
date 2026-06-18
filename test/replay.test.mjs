@@ -56,5 +56,16 @@ const r2 = await verifyChat([item(promoEarly)], { directory, genesisOwner: a.id 
 ok("lone owner cannot set_role (quorum 2 unmet)",
   !r2.ok && r2.failures[0].reasons.some((x) => x.startsWith("insufficient-quorum")));
 
+console.log("# a forgery cannot suppress a real event by poisoning its path (seenPaths)");
+// B (admin via t1) posts a real message; an attacker copies its id with a broken signature.
+// Same id => same path. Force the forgery to be verified FIRST (commitIndex) and check the real
+// one still validates — i.e. an INVALID event must not reserve the path.
+const msgB = await buildEvent(b, { kind: "message", chat_id: chat, to: [a.id], created_at: "2026-06-16T22:02:00.000Z", rnd: "mb", body: { text: "hola de B" }, recipients: enc([a.id, b.id]) });
+const forgedB = { ...msgB, sig: msgB.sig.slice(0, -2) + (msgB.sig.endsWith("zz") ? "aa" : "zz") };
+const ci = (it, n) => ({ ...it, commitIndex: n });
+const supp = await verifyChat([ci(item(t1), 0), ci(item(forgedB), 1), ci(item(msgB), 2)], { directory, genesisOwner: a.id });
+const realsOk = supp.results.filter((r) => r.path === item(msgB).path && r.verdict.ok);
+ok("real event still verifies though a forgery with its id ran first", realsOk.length === 1);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
