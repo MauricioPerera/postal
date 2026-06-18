@@ -66,5 +66,24 @@ rep = await proj.project(items, { directory: dir2, genesisOwner: alice.id });
 ok("revoked publisher's knowledge is gone after reprojection", proj.byPublisher(bob.id).length === 0);
 ok("trusted publisher's knowledge remains", proj.byPublisher(alice.id).length === 1);
 
+console.log("# key-squat blocked by commit order: a backdated root with a LATER commit loses");
+const chat3 = "c_" + alice.id + "_kb3";
+const chain3 = chainState();
+const item3 = (ev, commitIndex) => ({ path: eventPath(chat3, ev), event: ev, commitIndex });
+async function kn3(who, key, value, when) {
+  const { seq, prev } = chain3.next(who.id, chat3);
+  const ev = await buildEvent(who, { kind: "knowledge", chat_id: chat3, created_at: when, rnd: "s" + key + seq, body: { key, value }, seq, prev });
+  await chain3.record(ev); return ev;
+}
+const addBob3 = item3(await buildMemberEvent(alice, { chat_id: chat3, created_at: "2026-06-16T19:00:00.000Z", rnd: "addb3", op: "add", target: bob.id, role: "member" }), 0);
+// Alice committed her root FIRST (commitIndex 1) but with a LATER created_at; Bob backdates his
+// created_at (smaller id) yet committed LATER (commitIndex 2). Commit order must make Alice the owner.
+const aliceRoot = item3(await kn3(alice, "widget", "alice-legit", "2026-06-16T22:00:00.000Z"), 1);
+const bobSquat = item3(await kn3(bob, "widget", "bob-backdated-squat", "2026-06-16T19:15:00.000Z"), 2);
+const proj3 = makeProjector();
+await proj3.project([addBob3, aliceRoot, bobSquat], { directory, genesisOwner: alice.id });
+const widget = proj3.findByKey("widget");
+ok("the earlier-COMMITTED root owns the key, not the earlier-DATED one", widget.length === 1 && widget[0].value === "alice-legit");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

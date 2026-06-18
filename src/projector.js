@@ -32,40 +32,50 @@ function localEmbed(text) {
   return Array.from(v, (x) => x / norm);
 }
 
-// Resolve "records": a record is a `key` with a chain of versions linked by
+// Resolve "records": a record is a shared `key` with a chain of versions linked by
 // `supersedes` (event id of the version it replaces). The current value is the HEAD
 // (a version no valid event supersedes). A tombstone head = deleted. Authorization:
 // a version may supersede a record only if its author is the record's ORIGINAL author
 // OR an owner/admin (governance override). Stale/unauthorized supersedes are dropped.
 // Optimistic concurrency: an update must point at the current head; forks are flagged.
-function resolveRecords(verifiedEvents, members) {
+//
+// Root (= owner) selection is by COMMIT ORDER — operator-anchored and NOT spoofable — when a git
+// reader attaches `commitIndex`, falling back to `id` (created_at-derived) otherwise. This stops a
+// foreign author from seizing a shared key by BACKDATING created_at on a git-anchored read. Honest
+// residual: an OFFLINE read (no commitIndex) still falls back to created_at and remains squat-able.
+// Takes ITEMS ({ event, commitIndex? }) so the anchor survives (project passes them through).
+function resolveRecords(verifiedItems, members) {
   const admins = new Set((members || []).filter((m) => ["owner", "admin"].includes(m.role)).map((m) => m.id));
+  const ci = (it) => (Number.isInteger(it.commitIndex) ? it.commitIndex
+    : Number.isInteger(it.event.commitIndex) ? it.event.commitIndex : Number.MAX_SAFE_INTEGER);
+  const before = (a, b) => { const ca = ci(a), cb = ci(b); if (ca !== cb) return ca - cb; return a.event.id < b.event.id ? -1 : 1; };
+
   const byKey = new Map();
-  for (const ev of verifiedEvents) {
-    const key = String((ev.body && ev.body.key) || "");
+  for (const it of verifiedItems) {
+    const key = String((it.event.body && it.event.body.key) || "");
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
-    byKey.get(key).push(ev);
+    byKey.get(key).push(it);
   }
 
   const records = new Map();
-  for (const [key, versions] of byKey) {
-    const roots = versions.filter((v) => !v.supersedes).sort((a, b) => (a.id < b.id ? -1 : 1));
+  for (const [key, vItems] of byKey) {
+    const roots = vItems.filter((it) => !it.event.supersedes).sort(before);
     if (!roots.length) { records.set(key, { error: "no-root" }); continue; }
     const root = roots[0];
-    const authorized = (v) => v.from === root.from || admins.has(v.from);
+    const authorized = (it) => it.event.from === root.event.from || admins.has(it.event.from);
 
     let head = root;
-    const used = new Set([root.id]);
+    const used = new Set([root.event.id]);
     const conflicts = [...roots.slice(1)]; // extra roots = forked creation
     while (true) {
-      const cands = versions.filter((v) => v.supersedes === head.id && !used.has(v.id) && authorized(v));
+      const cands = vItems.filter((it) => it.event.supersedes === head.event.id && !used.has(it.event.id) && authorized(it));
       if (!cands.length) break;
-      cands.sort((a, b) => (a.id < b.id ? -1 : 1));
-      head = cands[0]; used.add(head.id);
-      for (const v of cands.slice(1)) conflicts.push(v); // forked update
+      cands.sort(before);
+      head = cands[0]; used.add(head.event.id);
+      for (const it of cands.slice(1)) conflicts.push(it); // forked update
     }
-    records.set(key, { head, deleted: head.kind === "tombstone", conflicts, rootAuthor: root.from });
+    records.set(key, { head: head.event, deleted: head.event.kind === "tombstone", conflicts, rootAuthor: root.event.from });
   }
   return records;
 }
@@ -124,10 +134,11 @@ export function makeProjector({ db, embed = localEmbed, dim = EMBED_DIM } = {}) 
       vstore = new VectorStore(new VecMemoryAdapter(), dim); // fresh vector index
 
       const rejected = failedPaths.size;
-      // Resolve records (supersession + tombstones + authorization) over verified events.
-      const verified = items.filter((it) => it.event && !failedPaths.has(it.path)).map((it) => it.event);
-      const verifiedIds = new Set(verified.map((e) => e.id)); // gate-derived truth set
-      const records = resolveRecords(verified, result.members);
+      // Resolve records (supersession + tombstones + authorization) over verified items. We keep the
+      // ITEMS (not just .event) so resolveRecords can anchor root selection on commitIndex.
+      const verifiedItems = items.filter((it) => it.event && !failedPaths.has(it.path));
+      const verifiedIds = new Set(verifiedItems.map((it) => it.event.id)); // gate-derived truth set
+      const records = resolveRecords(verifiedItems, result.members);
 
       let indexed = 0, deleted = 0;
       for (const rec of records.values()) {
