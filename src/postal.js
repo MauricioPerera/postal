@@ -110,9 +110,16 @@ export async function verifyIdentityDoc(doc) {
   // walk the rotation chain
   let prevSign = genesisSignPub(doc);
   let lastEnc = null;
+  let prevTime = null;
   for (let i = 0; i < rot.length; i++) {
     const r = rot[i];
     if (!r || r.seq !== i + 1 || r.from_sign_pub !== prevSign || !r.to_sign_pub || !r.to_enc_pub || !r.sig) return false;
+    // Timestamps must be valid and strictly increasing: a rotation can never move BACK in time.
+    // Non-monotonic created_at would produce inverted/overlapping key validity windows
+    // (keyTimeline), widening the backdating window an attacker gets from a compromised key.
+    const t = Date.parse(r.created_at || "");
+    if (Number.isNaN(t) || (prevTime !== null && t <= prevTime)) return false;
+    prevTime = t;
     const fromPub = await importSignPublic(r.from_sign_pub);
     if (!(await verify(fromPub, r.sig, canonical(stripField(r, "sig"))))) return false;
     prevSign = r.to_sign_pub;

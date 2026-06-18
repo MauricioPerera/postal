@@ -65,5 +65,16 @@ const sealedToOld = await buildEvent(bob, { kind: "message", chat_id: "c1", to: 
 ok("rotated identity opens a message sealed to an OLD enc key",
   (await openMessage(sealedToOld, alice2)) === "para alice vieja");
 
+console.log("# a rotation is not a time machine: the new key cannot backdate before its activation");
+// alice2 activated at its rotation time (23:30). An event it signs dated BEFORE that (when key1
+// was the active key) must be rejected — otherwise rotating would grant retroactive forging power.
+const newBackdated = await buildEvent(alice2, { kind: "message", chat_id: "c1", to: [bob.id], created_at: "2026-06-16T23:15:00.000Z", rnd: "nbd", body: { text: "backdated" }, recipients: enc });
+const rnb = await verifyEvent(newBackdated, { directory, members });
+ok("current key signing an event dated before its activation is rejected", !rnb.ok && rnb.reasons.includes("invalid-signature"));
+
+console.log("# the rotation chain must have strictly increasing timestamps");
+const backRot = await rotateIdentity(alice2, "2026-06-16T22:00:00.000Z");   // earlier than the prev rotation (23:30)
+ok("non-monotonic rotation chain is rejected", !(await verifyIdentityDoc(await publicIdentityDoc(backRot))));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
