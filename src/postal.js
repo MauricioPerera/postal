@@ -436,16 +436,28 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
     R(!members.some((m) => m.id === ev.from), "author-not-member");
   }
 
-  // 5. governance: membership changes need a quorum of authorized approvers
+  // 5. governance: membership changes need a quorum of authorized approvers, PLUS two
+  //    root-of-trust invariants that a quorum alone cannot override:
+  //      (a) the genesis owner cannot be removed or have its role changed by anyone, and
+  //      (b) only the owner may promote to admin/owner — so a lone admin cannot mint a
+  //          complice admin and then form a quorum to depose the owner.
   if (ev.kind === "member") {
     const op = ev.body && ev.body.op;
     const policy = Object.assign({}, DEFAULT_GOVERNANCE, governance || {});
     if (!op || !(op in policy)) {
       reasons.push("unknown-member-op");
     } else if (members) {
-      const need = policy[op];
-      const have = await countApprovers(ev, directory, members);
-      R(have < need, `insufficient-quorum(${have}/${need})`);
+      const ownerId = (members.find((m) => m.role === "owner") || {}).id;
+      const promoting = (op === "add" || op === "set_role") && (ev.body.role === "admin" || ev.body.role === "owner");
+      if (ownerId && ev.body.target === ownerId && (op === "remove" || op === "set_role")) {
+        reasons.push("cannot-depose-owner");
+      } else if (promoting && ev.from !== ownerId) {
+        reasons.push("only-owner-promotes");
+      } else {
+        const need = policy[op];
+        const have = await countApprovers(ev, directory, members);
+        R(have < need, `insufficient-quorum(${have}/${need})`);
+      }
     }
   }
 

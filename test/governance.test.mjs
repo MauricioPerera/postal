@@ -61,5 +61,29 @@ const badOp = await buildMemberEvent(owner, { ...base, created_at: "2026-06-16T2
 r = await verifyEvent(badOp, { directory, members });
 ok("unknown member op rejected", !r.ok && r.reasons.includes("unknown-member-op"));
 
+console.log("# root-of-trust invariants: no privilege escalation, owner is immutable");
+// members here: owner A, admin B, admin C (candidate was promoted to admin above).
+ok("setup: two admins + owner present",
+  members.filter((m) => m.role === "admin").length === 2 && members.some((m) => m.role === "owner"));
+
+// (b) a lone admin CANNOT add a complice admin (only the owner may promote).
+const adminAddsAdmin = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:00:00.000Z", rnd: "esc001", op: "add", target: outsider.id, role: "admin" });
+r = await verifyEvent(adminAddsAdmin, { directory, members });
+ok("a non-owner promoting to admin is rejected (only-owner-promotes)", !r.ok && r.reasons.includes("only-owner-promotes"));
+
+// a lone admin can still add a regular MEMBER (quorum 1) — only promotion is owner-gated.
+const adminAddsMember = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:01:00.000Z", rnd: "mem001", op: "add", target: outsider.id, role: "member" });
+ok("a non-owner can still add a plain member (quorum 1)", (await verifyEvent(adminAddsMember, { directory, members })).ok);
+
+// (a) two admins CANNOT remove the genesis owner.
+const removeOwner = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:02:00.000Z", rnd: "rmo001", op: "remove", target: owner.id }, [cand]);
+r = await verifyEvent(removeOwner, { directory, members });
+ok("two admins cannot remove the owner (cannot-depose-owner)", !r.ok && r.reasons.includes("cannot-depose-owner"));
+
+// (a) two admins CANNOT downgrade the owner to member.
+const downgradeOwner = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:03:00.000Z", rnd: "dno001", op: "set_role", target: owner.id, role: "member" }, [cand]);
+r = await verifyEvent(downgradeOwner, { directory, members });
+ok("two admins cannot downgrade the owner (cannot-depose-owner)", !r.ok && r.reasons.includes("cannot-depose-owner"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
