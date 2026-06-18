@@ -9,7 +9,10 @@
 //
 // Trade-off (honest): because from/to are encrypted, the PUBLIC CI gate can no longer
 // verify authorship/authorization — only members (who hold keys) can, at read time.
-// See docs/metadata.md.
+// And because hiding metadata means NO deterministic id/path and no seq/prev chain,
+// private mode provides NO anti-replay: a host could duplicate an outer file and a naive
+// reader would process it twice. Consumers MUST dedup at read time — e.g. by the inner
+// signature, which is identical across a replayed copy. See docs/metadata.md.
 
 import {
   canonical, sha256, utf8Bytes, bytesToBase64, randomBytes,
