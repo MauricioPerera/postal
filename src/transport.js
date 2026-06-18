@@ -69,7 +69,10 @@ export async function pollChat(client, identity, chat_id, { directory, members }
     try { ev = JSON.parse(file.content); } catch { out.push({ path, event: null, verdict: { ok: false, reasons: ["unparseable"] } }); continue; }
 
     const verdict = await verifyEvent(ev, { directory, members, seenPaths });
-    seenPaths.add(path);
+    // The append-only key must be the event's CANONICAL path (the value verifyEvent checks),
+    // not the file path — otherwise the SAME event committed at two different file paths passes
+    // the gate twice. And only a VALID event reserves its path (an invalid copy must not poison it).
+    if (verdict.ok) seenPaths.add(eventPath(ev.chat_id, ev));
 
     let text = null;
     if (verdict.ok && ev.kind === "message") {
