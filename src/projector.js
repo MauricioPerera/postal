@@ -32,12 +32,11 @@ function localEmbed(text) {
   return Array.from(v, (x) => x / norm);
 }
 
-// Resolve "records": a record is a (publisher, `key`) pair with a chain of versions linked by
-// `supersedes` (event id of the version it replaces). The current value is the HEAD (a version no
-// valid event supersedes). A tombstone head = deleted. Records are NAMESPACED BY AUTHOR: a key is
-// owned per-publisher, so a foreign author cannot seize or shadow someone else's key by backdating
-// a smaller-id root (created_at is self-asserted). Consequently only that author supersedes their
-// own record. Queries by key may return one doc PER publisher; consumers disambiguate by `publisher`.
+// Resolve "records": a record is a `key` with a chain of versions linked by
+// `supersedes` (event id of the version it replaces). The current value is the HEAD
+// (a version no valid event supersedes). A tombstone head = deleted. Authorization:
+// a version may supersede a record only if its author is the record's ORIGINAL author
+// OR an owner/admin (governance override). Stale/unauthorized supersedes are dropped.
 // Optimistic concurrency: an update must point at the current head; forks are flagged.
 function resolveRecords(verifiedEvents, members) {
   const admins = new Set((members || []).filter((m) => ["owner", "admin"].includes(m.role)).map((m) => m.id));
@@ -45,9 +44,8 @@ function resolveRecords(verifiedEvents, members) {
   for (const ev of verifiedEvents) {
     const key = String((ev.body && ev.body.key) || "");
     if (!key) continue;
-    const nk = ev.from + "\x00" + key;   // namespace the record by its author
-    if (!byKey.has(nk)) byKey.set(nk, []);
-    byKey.get(nk).push(ev);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(ev);
   }
 
   const records = new Map();
