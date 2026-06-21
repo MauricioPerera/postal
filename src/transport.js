@@ -51,6 +51,22 @@ export async function postMessage(client, identity, { chat_id, to, text, directo
   return ev;
 }
 
+// Send a signed, PUBLIC (unsealed) event — a journal / decision record readable by ANYONE with
+// repo access (provenance + tamper-evidence, no secrecy). For sealed private messages use
+// postMessage. `kind` is an open kind (e.g. "decision", "note") and must NOT be "message".
+export async function postEvent(client, identity, { chat_id, kind, body, to = [], created_at }) {
+  if (kind === "message") throw new Error("postEvent es para eventos públicos; usá postMessage para mensajes sellados");
+  if (!kind || !String(kind).trim()) throw new Error("postEvent requiere un kind no vacío");
+  const ev = await buildEvent(identity, {
+    kind, chat_id, to,
+    created_at: created_at || new Date().toISOString(),
+    rnd: newRnd(),
+    body: body || {},
+  });
+  await client.putFile(eventPath(chat_id, ev), JSON.stringify(ev, null, 2), `postal: ${kind} in ${chat_id}`);
+  return ev;
+}
+
 // Read a chat: list events, run the HARD gate on each (verify-on-read), and for
 // valid messages addressed to us, open (decrypt) the body.
 // Returns [{ path, event, verdict, text }]. Events failing the gate are kept with
