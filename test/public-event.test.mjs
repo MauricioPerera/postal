@@ -1,6 +1,6 @@
 // postEvent: signed PUBLIC events (journal / decision records) — readable by anyone with repo
 // access, no sealing. Run: node test/public-event.test.mjs
-import { createIdentity, publicIdentityDoc, verifyEvent } from "../src/postal.js";
+import { createIdentity, publicIdentityDoc, verifyEvent, newChatId, buildChatMeta, chatMetaPath } from "../src/postal.js";
 import { postEvent, pollChat } from "../src/transport.js";
 
 let pass = 0, fail = 0;
@@ -18,8 +18,11 @@ const directory = { [alice.id]: await publicIdentityDoc(alice), [bob.id]: await 
 const members = [{ id: alice.id, role: "owner" }, { id: bob.id, role: "member" }];
 
 const store = new Map();
+const chat = newChatId(alice.id, "journal");
+const meta = await buildChatMeta(alice, { chat_id: chat });
+await memClient(store).putFile(chatMetaPath(chat), JSON.stringify(meta));
 const ev = await postEvent(memClient(store), alice, {
-  chat_id: "journal", kind: "decision",
+  chat_id: chat, kind: "decision",
   body: { title: "elegir qwen3-coder", rationale: "benchmark: cubre hard a ~4s; kimi no aporta" },
 });
 
@@ -36,7 +39,7 @@ try { await postEvent(memClient(new Map()), alice, { chat_id: "j", kind: "messag
 ok("postEvent rechaza kind 'message'", threw);
 
 console.log("# CUALQUIERA con acceso lo lee: bob (no destinatario) ve el body en claro");
-const items = await pollChat(memClient(store), bob, "journal", { directory, members });
+const items = await pollChat(memClient(store), bob, chat, { directory, members });
 const got = items.find((i) => i.verdict.ok && i.event && i.event.kind === "decision");
 ok("bob lee el body sin ser destinatario", got && got.event.body.title === "elegir qwen3-coder");
 

@@ -5,6 +5,7 @@ import { ghClient, newRnd } from "./github.js";
 import {
   publicIdentityDoc, verifyIdentityDoc, userPath,
   buildEvent, eventPath, openMessage, verifyEvent,
+  chatMetaPath, verifyChatMeta, verifyChat,
 } from "./postal.js";
 import { canonicalOrder } from "./order.js";
 
@@ -68,44 +69,76 @@ export async function postEvent(client, identity, { chat_id, kind, body, to = []
   return ev;
 }
 
-// Read a chat: list events, run the HARD gate on each (verify-on-read), and for
-// valid messages addressed to us, open (decrypt) the body.
+// Read a chat through the FULL chat gate (verify-on-read). The chat's meta.json
+// (signed by the genesis owner) is the ONLY source of the genesis owner and the
+// governance policy the gate uses; a chat with no valid meta is NOT trusted. We
+// therefore load + verify the meta first, then run verifyChat over all events at
+// once (it derives membership from member events, so callers don't pass `members`).
 // Returns [{ path, event, verdict, text }]. Events failing the gate are kept with
 // verdict.ok=false so the caller can see WHY they were rejected — but a real client
-// would simply not render them.
+// would simply not render them. The public signature is unchanged: `members` is
+// ignored (the replay derives the membership).
 export async function pollChat(client, identity, chat_id, { directory, members } = {}) {
   const prefix = `.postal/chats/${chat_id}/events/`;
   const paths = (await client.listTree(prefix)).sort();
-  const seenPaths = new Set();
-  const out = [];
 
+  // Read + parse every file once. Non-parseable files are kept apart with a
+  // 'unparseable' verdict — they must NOT vanish from the output.
+  const items = [];      // { path, event }
+  const unparseable = []; // { path, event:null, verdict }
   for (const path of paths) {
     const file = await client.getFile(path);
     if (!file) continue;
     let ev;
-    try { ev = JSON.parse(file.content); } catch { out.push({ path, event: null, verdict: { ok: false, reasons: ["unparseable"] } }); continue; }
-
-    const verdict = await verifyEvent(ev, { directory, members, seenPaths });
-    // The append-only key must be the event's CANONICAL path (the value verifyEvent checks),
-    // not the file path — otherwise the SAME event committed at two different file paths passes
-    // the gate twice. And only a VALID event reserves its path (an invalid copy must not poison it).
-    if (verdict.ok) seenPaths.add(eventPath(ev.chat_id, ev));
-
-    let text = null;
-    if (verdict.ok && ev.kind === "message") {
-      try { text = await openMessage(ev, identity); } catch { text = null; } // not a recipient
-    }
-    out.push({ path, event: ev, verdict, text });
+    try { ev = JSON.parse(file.content); } catch { unparseable.push({ path, event: null, verdict: { ok: false, reasons: ["unparseable"] } }); continue; }
+    items.push({ path, event: ev });
   }
 
-  // Return items in CANONICAL order — the same cross-author order verifyChat treats as
-  // authoritative (commitIndex, then created_at, then id) — instead of the lexical file-path
-  // order the dedup loop walked. The dedup walk above stays lexical, so the append-only
-  // "first valid copy wins" semantics are unchanged; only the RETURNED order moves.
-  // canonicalOrder drops items without a parseable event (event:null), so sort only the
-  // parseable items and re-append the unparseable ones at the end in their original (lexical)
-  // path order — invalid/unparseable items must NOT vanish from the output. No input mutation.
-  const parseable = out.filter((it) => it.event);
-  const unparseable = out.filter((it) => !it.event);
-  return [...canonicalOrder(parseable), ...unparseable];
+  // Load + verify the chat meta. The genesis owner and governance come ONLY from a
+  // meta that passes verifyChatMeta; a chat without a valid meta is untrusted.
+  let meta = null;
+  const metaFile = await client.getFile(chatMetaPath(chat_id));
+  if (metaFile) {
+    try { meta = JSON.parse(metaFile.content); } catch { meta = null; }
+  }
+  const metaVerdict = await verifyChatMeta(meta, { directory, chatId: chat_id });
+
+  if (!metaVerdict.ok) {
+    // Untrusted chat: do NOT run the gate against its events. Mark every read item
+    // with 'chat-meta-invalid' (plus the meta's own reasons); preserve the
+    // non-parseable ones as 'unparseable'. No input mutation, canonical order kept.
+    const reasons = ["chat-meta-invalid", ...metaVerdict.reasons];
+    const parseable = items.map((it) => ({ path: it.path, event: it.event, verdict: { ok: false, reasons } }));
+    return [...canonicalOrder(parseable), ...unparseable];
+  }
+
+  // Trusted chat: run the FULL gate over all events at once. verifyChat derives
+  // membership from member events (genesis owner seeded from the meta) and
+  // returns per-path verdicts plus cross-author hash-chain failures.
+  const res = await verifyChat(items, { directory, genesisOwner: meta.created_by, governance: meta.governance });
+
+  // Build path -> verdict from res.results, then fold in res.failures: a failure
+  // only OVERWRITES a verdict if that path isn't already ok=false (verifyChat's own
+  // per-event verdict is the richer one; chain failures add reasons to valid-looking
+  // events that nonetheless broke the per-author sequence).
+  const verdicts = new Map();
+  for (const r of res.results) verdicts.set(r.path, r.verdict);
+  for (const f of res.failures) {
+    const existing = verdicts.get(f.path);
+    if (!existing || existing.ok) verdicts.set(f.path, { ok: false, reasons: f.reasons });
+  }
+
+  const out = [];
+  for (const it of items) {
+    const verdict = verdicts.get(it.path) || { ok: false, reasons: ["no-verdict"] };
+    let text = null;
+    if (verdict.ok && it.event.kind === "message") {
+      try { text = await openMessage(it.event, identity); } catch { text = null; } // not a recipient
+    }
+    out.push({ path: it.path, event: it.event, verdict, text });
+  }
+
+  // Canonical order on the parseable items; non-parseable re-appended at the end in
+  // their original (lexical) path order — invalid/unparseable items must NOT vanish.
+  return [...canonicalOrder(out), ...unparseable];
 }
