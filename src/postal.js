@@ -13,6 +13,7 @@ import {
   sealForRecipients, openSealed,
 } from "./crypto.js";
 import { canonicalOrder } from "./order.js";
+import { validateAttestation } from "./trust.js";
 
 export const VERSION = 1;
 export const MARKER = "POSTAL1:";
@@ -416,6 +417,20 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   R(ev && Number.isNaN(Date.parse(ev.created_at || "")), "bad-date");
   R(ev && !ev.sig, "missing-signature");
   if (reasons.length) return { ok: false, reasons };
+
+  // 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
+  //     open kinds stay free-form. The attest validator is the canonical one from
+  //     trust.js (single source of truth) — a malformed attest is rejected HERE,
+  //     not silently surfaced later as 'invalid' by activeEdges.
+  if (ev.kind === "attest" || ev.kind === "attest-revoke") {
+    const av = validateAttestation(ev);
+    if (!av.ok) { reasons.push(...av.reasons); return { ok: false, reasons }; }
+  } else if (ev.kind === "member") {
+    const b = ev.body || {};
+    if ((b.op === "add" || b.op === "remove" || b.op === "set_role") &&
+        (typeof b.target !== "string" || !b.target)) reasons.push("bad-member-target");
+    if (b.role != null && !["member", "admin", "owner"].includes(b.role)) reasons.push("bad-member-role");
+  }
 
   // 2. path determinism: id must encode created_at + from
   const expectIdPrefix = ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";

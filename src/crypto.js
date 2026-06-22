@@ -30,7 +30,13 @@ export const randomBytes = (n) => getRandomValues(new Uint8Array(n));
 // --- canonical JSON: stable, sorted-key serialization for signing --------------
 // Two semantically equal objects MUST produce identical bytes, or signatures break.
 export function canonical(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  const t = typeof value;
+  // Fail-closed: undefined/function/symbol are NOT valid JSON. JSON.stringify would drop them
+  // (object key omitted, array slot -> null) — silently corrupting a signed payload. For a signing
+  // primitive we throw instead, at any depth (root, array element, object property value).
+  if (t === "undefined" || t === "function" || t === "symbol")
+    throw new Error("canonical: non-JSON value (" + t + ")");
+  if (value === null || t !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   const keys = Object.keys(value).sort();
   return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonical(value[k])).join(",") + "}";

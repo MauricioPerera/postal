@@ -6,6 +6,7 @@ import {
   publicIdentityDoc, verifyIdentityDoc, userPath,
   buildEvent, eventPath, openMessage, verifyEvent,
 } from "./postal.js";
+import { canonicalOrder } from "./order.js";
 
 export { ghClient };
 
@@ -96,5 +97,15 @@ export async function pollChat(client, identity, chat_id, { directory, members }
     }
     out.push({ path, event: ev, verdict, text });
   }
-  return out;
+
+  // Return items in CANONICAL order — the same cross-author order verifyChat treats as
+  // authoritative (commitIndex, then created_at, then id) — instead of the lexical file-path
+  // order the dedup loop walked. The dedup walk above stays lexical, so the append-only
+  // "first valid copy wins" semantics are unchanged; only the RETURNED order moves.
+  // canonicalOrder drops items without a parseable event (event:null), so sort only the
+  // parseable items and re-append the unparseable ones at the end in their original (lexical)
+  // path order — invalid/unparseable items must NOT vanish from the output. No input mutation.
+  const parseable = out.filter((it) => it.event);
+  const unparseable = out.filter((it) => !it.event);
+  return [...canonicalOrder(parseable), ...unparseable];
 }
