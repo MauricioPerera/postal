@@ -30,7 +30,7 @@ rechaza el push inválido). Detalle: [`postal-spec.md`](postal-spec.md).
 ## Probarlo
 
 ```bash
-npm test    # 118 passed, 0 failed  (14 suites de protocolo, offline)
+npm test    # 281 passed, 0 failed  (22 suites de protocolo, offline)
 
 # transporte real contra un repo privado de GitHub:
 GH_TOKEN=$(gh auth token) GH_OWNER=<owner> GH_REPO=<repo> node test/integration.test.mjs
@@ -49,7 +49,8 @@ manipulado, autor no-miembro, autor desconocido, sobrescritura e id no determini
 
 - `publishIdentity` → publica tu identidad auto-firmada en `.postal/users/<id>.json`
 - `postMessage` → firma + sella y commitea el evento
-- `pollChat` → lista, corre el **gate al leer** (`verifyEvent`) y descifra lo tuyo
+- `pollChat` → lista, corre el **gate al leer** (`verifyEvent`), descifra lo tuyo y
+  devuelve los eventos en **orden canónico** (el mismo que `verifyChat`, no el orden de path)
 
 **Probado contra un repo privado real** (9/9): GitHub almacena solo eventos sellados
 (`POSTAL1:`) + firmados, sin texto plano; Bob pasa el gate y descifra; Eve ve un evento
@@ -77,7 +78,7 @@ mergearse — el modelo CCDD en el lado de escritura.
 ```
 postal-spec.md            contrato híbrido + layout + reglas del gate
 docs/                     metadata.md (privacidad) · knowledge-base.md (projector/RAG)
-schema/                   JSON Schema de identidad y evento (la parte dura)
+schema/                   JSON Schema de identidad y evento (con drift guard vs el gate inline)
 src/crypto.js             primitivas: ECDSA, ECDH, canonical JSON, fingerprint, sellado
 src/postal.js             identidad, rotación, eventos firmados/sellados, hash-chain,
                           gobernanza, verifyEvent + verifyChat (gate, replay), CRUD
@@ -89,7 +90,15 @@ src/transport.js          protocolo-sobre-git: publish, post, poll (verify-on-re
 src/projector.js          índice derivado (js-doc-store + js-vector-store) de lo verificado
 src/cli.js                gate como comando (verify) para CI
 vendor/                   js-doc-store + js-vector-store (MIT, vendored para el projector)
-test/                     14 suites, 118 tests offline + integration.test.mjs (9, repo real)
+test/                     22 suites, 281 tests offline (npm test) + integration.test.mjs (9, repo real)
+                          schema.test.mjs (drift guard) · mutation-audit.mjs · coverage.mjs
+```
+
+## Verificación extra (opt-in, fuera de `npm test`)
+
+```bash
+npm run mutation-audit    # 6 mutaciones del oráculo de firma; deben morir las 6 (6/6 killed)
+npm run coverage          # cobertura por archivo (funcs/líneas) vía NODE_V8_COVERAGE, sin deps
 ```
 
 ## Alcance honesto
