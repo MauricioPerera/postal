@@ -44,5 +44,91 @@ ok("top-level keys sorted, no spaces (RFC §3.2.3 shape)",
 ok("nested objects recursively canonical", canonical({ b: { d: 1, c: 2 }, a: 3 }) === '{"a":3,"b":{"c":2,"d":1}}');
 ok("array order preserved (not sorted)", canonical([3, 1, 2]) === "[3,1,2]");
 
+console.log("# numbers — exponential boundaries (RFC 8785 §3.2.2.3 = ECMAScript Number-to-String)");
+// JS switches to exponential at 1e21 (inclusive) upward and 1e-7 (inclusive) downward.
+ok("1e21 -> exponential '1e+21' (boundary: >= 1e21 uses short form)", canonical(1e21) === "1e+21");
+ok("1e20 -> decimal '100000000000000000000' (just below the boundary stays plain)", canonical(1e20) === "100000000000000000000");
+ok("-1e21 -> '-1e+21' (sign preserved on the exponential boundary)", canonical(-1e21) === "-1e+21");
+ok("1e-6 -> decimal '0.000001' (boundary: > 1e-7 stays plain)", canonical(1e-6) === "0.000001");
+ok("1e-7 -> exponential '1e-7' (lower boundary flips to short form)", canonical(1e-7) === "1e-7");
+ok("negative small exp '-1e-7'", canonical(-1e-7) === "-1e-7");
+
+console.log("# numbers — trailing-zero decimals collapse (ECMAScript, hence JCS)");
+ok("1.0 -> '1' (trailing .0 dropped)", canonical(1.0) === "1");
+ok("100.0 -> '100' (trailing .0 dropped)", canonical(100.0) === "100");
+ok("4.50 -> '4.5' (insignificant trailing zero dropped)", canonical(4.50) === "4.5");
+ok("-0 -> '0' (negative zero normalizes, JCS §3.2.2.3)", canonical(-0) === "0");
+
+console.log("# numbers — extremes and double rounding (the IEEE-754 reality JCS inherits)");
+ok("5e-324 (Number.MIN_VALUE) -> '5e-324' (smallest denormal serializes)", canonical(5e-324) === "5e-324");
+ok("Number.MAX_VALUE -> '1.7976931348623157e+308'", canonical(Number.MAX_VALUE) === "1.7976931348623157e+308");
+ok("0.1 -> '0.1' (the nearest double rounds back to 0.1 on stringify)", canonical(0.1) === "0.1");
+ok("0.2 -> '0.2'", canonical(0.2) === "0.2");
+ok("0.1+0.2 -> '0.30000000000000004' (double rounding surfaced; canonical is faithful to the stored double)",
+  canonical(0.1 + 0.2) === "0.30000000000000004");
+
+console.log("# HONEST LIMIT 1 — NaN / Infinity: JSON has no representation; canonical() mirrors JSON.stringify");
+// RFC 8785 scopes to JSON values; NaN/±Infinity are NOT valid JSON. canonical() routes these through
+// JSON.stringify, which returns the literal string "null". They MUST NOT appear in signed event payloads
+// (they would silently canonicalize to "null" and be indistinguishable from real null). Pinned so a future
+// change to the primitive path is noticed.
+ok("NaN -> 'null' (NOT a number; would corrupt a signed payload — documented limit)",
+  canonical(NaN) === "null" && typeof canonical(NaN) === "string");
+ok("Infinity -> 'null' (same as NaN; not valid JSON)", canonical(Infinity) === "null");
+ok("-Infinity -> 'null'", canonical(-Infinity) === "null");
+ok("NaN, Infinity, -Infinity all canonicalize to the SAME token 'null' (collision — inherent, not a JCS bug)",
+  canonical(NaN) === canonical(Infinity) && canonical(Infinity) === canonical(-Infinity));
+ok("[NaN, Infinity] -> '[null,null]' (propagates through arrays)", canonical([NaN, Infinity]) === "[null,null]");
+
+console.log("# HONEST LIMIT 2 — integers > 2^53 lose precision (inherent to IEEE-754 doubles, NOT JCS)");
+// Number.MAX_SAFE_INTEGER + 1 and + 2 both round to the same even double. JCS faithfully serializes the
+// stored double, so two distinct source literals collapse to one token. This is JS's limit, not canonical()'s.
+ok("MAX_SAFE_INTEGER (2^53-1) -> '9007199254740991' (exact)", canonical(Number.MAX_SAFE_INTEGER) === "9007199254740991");
+ok("MAX_SAFE_INTEGER+1 -> '9007199254740992' (rounds up to even)", canonical(Number.MAX_SAFE_INTEGER + 1) === "9007199254740992");
+ok("MAX_SAFE_INTEGER+2 -> '9007199254740992' too (precision lost; +1 === +2 as doubles — documented limit)",
+  canonical(Number.MAX_SAFE_INTEGER + 1) === canonical(Number.MAX_SAFE_INTEGER + 2));
+ok("2^60 literal serializes without integer-precision loss as stored",
+  canonical(1152921504606846976) === "1152921504606847000" && canonical(1152921504606846980) === "1152921504606847000");
+
+console.log("# FAIL-CLOSED — undefined / function / symbol: NOT JSON values; canonical() THROWS");
+// canonical() is a SIGNING primitive: a value JSON.stringify would not represent as valid JSON must not
+// silently become a token. JSON.stringify omits undefined-valued object keys and nulls undefined array
+// slots; canonical() instead THROWS at any depth (root, array element, object property value), so a
+// non-JSON payload can never be signed. (null IS valid JSON — not thrown.) NaN/Infinity are out of scope
+// here: they still serialize as 'null' (see HONEST LIMIT 1).
+const throws = (n, fn) => { try { fn(); ok(n, false); } catch (e) { ok(n + " :: " + e.message, e instanceof Error); } };
+throws("undefined at root throws", () => canonical(undefined));
+throws("undefined in array throws", () => canonical([1, undefined, 2]));
+throws("undefined as object value throws (key NOT silently omitted)", () => canonical({ a: 1, b: undefined, c: 2 }));
+throws("function at root throws", () => canonical(() => 1));
+throws("function in array throws", () => canonical([1, () => 1, 2]));
+throws("function as object value throws (key NOT silently omitted)", () => canonical({ a: 1, f: () => 1, c: 2 }));
+throws("symbol at root throws", () => canonical(Symbol("x")));
+throws("symbol in array throws", () => canonical([1, Symbol("x"), 2]));
+throws("symbol as object value throws (key NOT silently omitted)", () => canonical({ a: 1, s: Symbol("x"), c: 2 }));
+ok("null is valid JSON — NOT thrown (distinct from undefined)", canonical(null) === "null");
+throws("nested non-JSON value deep in structure throws", () => canonical({ a: [1, { b: undefined }] }));
+
+console.log("# structure — deep nesting, empties, no Unicode normalization, no duplicate keys");
+ok("deeply nested objects canonicalize recursively",
+  canonical({ a: { b: { c: { d: 1 } } } }) === '{"a":{"b":{"c":{"d":1}}}}');
+ok("deeply nested arrays canonicalize recursively",
+  canonical([[[[1]]]]) === "[[[[1]]]]");
+ok("empty array -> '[]'", canonical([]) === "[]");
+ok("empty object -> '{}'", canonical({}) === "{}");
+ok("empty array and empty object are distinct tokens", canonical([]) !== canonical({}));
+// JCS does NO Unicode normalization: the same grapheme as NFC (U+00F3) vs NFD (o + U+0301) are
+// different UTF-16 code-unit sequences, so they sort and serialize differently. Asserted so nobody
+// assumes canonical() "normalizes" — it does not, and must not, for signature stability.
+const nfc = "ó", nfd = "ó"; // U+00F3 vs o + combining acute
+ok("NFC and NFD of the same grapheme serialize to DIFFERENT tokens (no Unicode normalization — JCS by design)",
+  canonical({ [nfc]: 1 }) === '{"ó":1}'
+  && canonical({ [nfd]: 1 }) === '{"ó":1}'
+  && canonical({ [nfc]: 1 }) !== canonical({ [nfd]: 1 }));
+// Object literal keys are already unique by construction (later wins silently); Object.keys reflects one
+// entry per name, so canonical() can never emit a duplicate key. Asserted to document the invariant.
+ok("duplicate literal keys collapse to one (impossible to emit a duplicate key via Object.keys)",
+  Object.keys({ x: 1, x: 2 }).length === 1 && canonical({ x: 1, x: 2 }) === '{"x":2}');
+
 console.log(`\n${p} passed, ${f} failed`);
 if (f) process.exit(1);
