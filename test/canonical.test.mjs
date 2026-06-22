@@ -67,18 +67,28 @@ ok("0.2 -> '0.2'", canonical(0.2) === "0.2");
 ok("0.1+0.2 -> '0.30000000000000004' (double rounding surfaced; canonical is faithful to the stored double)",
   canonical(0.1 + 0.2) === "0.30000000000000004");
 
-console.log("# HONEST LIMIT 1 — NaN / Infinity: JSON has no representation; canonical() mirrors JSON.stringify");
-// RFC 8785 scopes to JSON values; NaN/±Infinity are NOT valid JSON. canonical() routes these through
-// JSON.stringify, which returns the literal string "null". They MUST NOT appear in signed event payloads
-// (they would silently canonicalize to "null" and be indistinguishable from real null). Pinned so a future
-// change to the primitive path is noticed.
-ok("NaN -> 'null' (NOT a number; would corrupt a signed payload — documented limit)",
-  canonical(NaN) === "null" && typeof canonical(NaN) === "string");
-ok("Infinity -> 'null' (same as NaN; not valid JSON)", canonical(Infinity) === "null");
-ok("-Infinity -> 'null'", canonical(-Infinity) === "null");
-ok("NaN, Infinity, -Infinity all canonicalize to the SAME token 'null' (collision — inherent, not a JCS bug)",
-  canonical(NaN) === canonical(Infinity) && canonical(Infinity) === canonical(-Infinity));
-ok("[NaN, Infinity] -> '[null,null]' (propagates through arrays)", canonical([NaN, Infinity]) === "[null,null]");
+console.log("# FAIL-CLOSED — NaN / Infinity / -Infinity: NOT valid JSON; canonical() THROWS (H6)");
+// RFC 8785 scopes to JSON values; NaN/±Infinity are NOT valid JSON. JSON.stringify coerces them to the
+// literal "null", so {x:NaN} and {x:null} would produce IDENTICAL signing bytes — silent corruption of a
+// signed payload. canonical() is a SIGNING primitive, so it THROWS on non-finite numbers at any depth
+// (root, array element, object property value), exactly like it does for undefined/function/symbol.
+const throwsNf = (n, fn) => { try { fn(); ok(n, false); } catch (e) { ok(n + " :: " + e.message, e instanceof Error); } };
+throwsNf("NaN at root throws", () => canonical(NaN));
+throwsNf("Infinity at root throws", () => canonical(Infinity));
+throwsNf("-Infinity at root throws", () => canonical(-Infinity));
+throwsNf("NaN in array throws", () => canonical([1, NaN, 2]));
+throwsNf("Infinity in array throws", () => canonical([1, Infinity, 2]));
+throwsNf("NaN as object value throws (NOT silently coerced to null)", () => canonical({ a: 1, b: NaN, c: 2 }));
+throwsNf("Infinity as object value throws", () => canonical({ a: 1, b: Infinity, c: 2 }));
+throwsNf("nested non-finite deep in structure throws", () => canonical({ a: [1, { b: Infinity }] }));
+ok("NaN no longer collides with null — null still serializes, NaN throws",
+  canonical(null) === "null" && (() => { try { canonical(NaN); return false; } catch { return true; } })());
+// Finite numbers are byte-identical to before the H6 fix (regression guard for valid inputs).
+ok("finite numbers unchanged: 0 -> '0'", canonical(0) === "0");
+ok("finite numbers unchanged: 1e30 -> '1e+30'", canonical(1e30) === "1e+30");
+ok("finite numbers unchanged: 4.50 -> '4.5'", canonical(4.50) === "4.5");
+ok("finite numbers unchanged: MAX_VALUE serializes", canonical(Number.MAX_VALUE) === "1.7976931348623157e+308");
+ok("finite numbers unchanged: 0.1+0.2 -> '0.30000000000000004'", canonical(0.1 + 0.2) === "0.30000000000000004");
 
 console.log("# HONEST LIMIT 2 — integers > 2^53 lose precision (inherent to IEEE-754 doubles, NOT JCS)");
 // Number.MAX_SAFE_INTEGER + 1 and + 2 both round to the same even double. JCS faithfully serializes the
@@ -94,8 +104,8 @@ console.log("# FAIL-CLOSED — undefined / function / symbol: NOT JSON values; c
 // canonical() is a SIGNING primitive: a value JSON.stringify would not represent as valid JSON must not
 // silently become a token. JSON.stringify omits undefined-valued object keys and nulls undefined array
 // slots; canonical() instead THROWS at any depth (root, array element, object property value), so a
-// non-JSON payload can never be signed. (null IS valid JSON — not thrown.) NaN/Infinity are out of scope
-// here: they still serialize as 'null' (see HONEST LIMIT 1).
+// non-JSON payload can never be signed. (null IS valid JSON — not thrown.) NaN/Infinity also throw —
+// see the FAIL-CLOSED non-finite section above (H6).
 const throws = (n, fn) => { try { fn(); ok(n, false); } catch (e) { ok(n + " :: " + e.message, e instanceof Error); } };
 throws("undefined at root throws", () => canonical(undefined));
 throws("undefined in array throws", () => canonical([1, undefined, 2]));

@@ -10,7 +10,7 @@
 //   - malformed bodies surfaced in `invalid`, never silently dropped.
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
-const edgeKey = (from, subject, claim) => from + "|" + subject + "|" + claim;
+const edgeKey = (from, subject, claim) => JSON.stringify([from, subject, claim ?? null]);
 
 // Validate an attest / attest-revoke body. Returns { ok, reasons }.
 export function validateAttestation(ev) {
