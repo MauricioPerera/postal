@@ -9,6 +9,10 @@
 //
 // Trade-off (honest): because from/to are encrypted, the PUBLIC CI gate can no longer
 // verify authorship/authorization — only members (who hold keys) can, at read time.
+// openPrivateEvent closes that gap when the caller passes the chat roster (`members`):
+// it rejects events whose author (inner.from) is not in the roster, so an identity that
+// merely exists in the directory cannot seal a private event to members and have it
+// accepted. Pass `members` = null/undefined to fall back to signature-only validation.
 // And because hiding metadata means NO deterministic id/path and no seq/prev chain,
 // private mode provides NO anti-replay: a host could duplicate an outer file and a naive
 // reader would process it twice. Consumers MUST dedup at read time — e.g. by the inner
@@ -57,26 +61,40 @@ export async function buildPrivateEvent(sender, { chat_id, kind = "message", to 
   return { v: PRIVATE_VERSION, t: "psealed", ...env };
 }
 
-// Verify an inner event's signature against the author's key chain (time-windowed).
-async function verifyInner(inner, directory) {
+// Verify an inner event's signature against the author's key chain (time-windowed),
+// and — when a members list is supplied — that the author is a member of the chat.
+// Returns 'ok' | 'invalid-signature' | 'not-member'. When `members` is null/undefined
+// the membership check is skipped (signature-only), so callers without a roster can
+// still validate authorship.
+async function verifyInner(inner, directory, members) {
   const doc = directory && directory[inner.from];
-  if (!doc) return false;
+  if (!doc) return "invalid-signature";
   const payload = canonical(stripSig(inner));
   const t = Date.parse(inner.created_at);
+  let sigOk = false;
   for (const k of keyTimeline(doc)) {
     if (k.revoked) continue;
     if (!Number.isNaN(t)) {
       if (k.from && t < Date.parse(k.from)) continue;
       if (k.until && t >= Date.parse(k.until)) continue;
     }
-    if (await verify(await importSignPublic(k.pub), inner.sig, payload)) return true;
+    if (await verify(await importSignPublic(k.pub), inner.sig, payload)) { sigOk = true; break; }
   }
-  return false;
+  if (!sigOk) return "invalid-signature";
+  if (members !== null && members !== undefined && !members.some((m) => m.id === inner.from)) {
+    return "not-member";
+  }
+  return "ok";
 }
 
 // Open + verify a private event as a member. Returns { ok, event } where event is the
-// decrypted inner routing+content, or { ok:false } if not a recipient / bad signature.
-export async function openPrivateEvent(outer, identity, chat_id, directory) {
+// decrypted inner routing+content, or { ok:false, reason } if not a recipient, the
+// signature is bad, or the author is not a member of the chat.
+//
+// `members` (optional): the chat roster [{ id, ... }]. When provided, openPrivateEvent
+// rejects events whose author (inner.from) is not in the roster — i.e. only members
+// can author private events. Without `members`, only the signature is checked.
+export async function openPrivateEvent(outer, identity, chat_id, directory, members) {
   if (!outer || outer.t !== "psealed") return { ok: false, reason: "not-private" };
   const aad = await chatTag(chat_id);
   let inner;
@@ -90,6 +108,8 @@ export async function openPrivateEvent(outer, identity, chat_id, directory) {
     if (!inner) return { ok: false, reason: "not-a-recipient" };
   }
   if (inner.chat_id !== chat_id) return { ok: false, reason: "chat-mismatch" };
-  if (!(await verifyInner(inner, directory))) return { ok: false, reason: "invalid-signature" };
+  const v = await verifyInner(inner, directory, members);
+  if (v === "invalid-signature") return { ok: false, reason: "invalid-signature" };
+  if (v === "not-member") return { ok: false, reason: "author-not-member" };
   return { ok: true, event: inner };
 }
