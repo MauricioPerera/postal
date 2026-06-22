@@ -42,5 +42,20 @@ const malloryMeta = await buildChatMeta(mallory, { chat_id: malloryChat, created
 r = await verifyChatMeta(malloryMeta, { directory, chatId: malloryChat });
 ok("a creator can make a chat under their own id", r.ok);
 
+console.log("# fail-closed on unparseable created_at (H4)");
+// verifyChatMeta reaches verifyEventSig WITHOUT the bad-date guard verifyEvent has. A meta whose
+// created_at is not parseable has a genuinely valid signature (signed over that exact string), so
+// before H4 the NaN date bypassed the key validity windows and the signature validated against any
+// non-revoked key. Now verifyEventSig returns false on NaN t -> meta rejected.
+const badDateChat = newChatId(owner.id, "bad1");
+const badDateMeta = await buildChatMeta(owner, { chat_id: badDateChat, created_at: "not-a-date" });
+r = await verifyChatMeta(badDateMeta, { directory, chatId: badDateChat });
+ok("meta with unparseable created_at is rejected (fail-closed, H4)",
+  !r.ok && r.reasons.includes("invalid-meta-signature"));
+// Sanity: the same meta with a valid created_at still verifies (the fix only flips on NaN).
+const goodDateMeta = await buildChatMeta(owner, { chat_id: badDateChat, created_at: "2026-06-16T10:00:00.000Z" });
+r = await verifyChatMeta(goodDateMeta, { directory, chatId: badDateChat });
+ok("same chat with a valid created_at still verifies (H4 does not regress valid dates)", r.ok);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

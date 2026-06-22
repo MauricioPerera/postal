@@ -36,6 +36,11 @@ export function canonical(value) {
   // primitive we throw instead, at any depth (root, array element, object property value).
   if (t === "undefined" || t === "function" || t === "symbol")
     throw new Error("canonical: non-JSON value (" + t + ")");
+  // Fail-closed: non-finite numbers (NaN/Infinity/-Infinity) are NOT valid JSON.
+  // JSON.stringify coerces them to 'null', so {x:NaN} and {x:null} would produce
+  // IDENTICAL signing bytes — silent corruption of a signed payload. Throw instead.
+  if (t === "number" && !Number.isFinite(value))
+    throw new Error("canonical: non-finite number");
   if (value === null || t !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   const keys = Object.keys(value).sort();

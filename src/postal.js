@@ -327,6 +327,11 @@ export function keyTimeline(doc) {
 // gracefully-rotated key only validates for events dated before it was rotated out.
 async function verifyEventSig(doc, sig, payload, createdAt) {
   const t = Date.parse(createdAt);
+  // Fail-closed: an unparseable createdAt must NOT validate a signature. Otherwise the
+  // key validity windows below are skipped (t === NaN bypasses the from/until guards)
+  // and the signature is checked against any non-revoked key. verifyEvent rejects bad
+  // dates upstream, but verifyChatMeta reaches here without that check.
+  if (Number.isNaN(t)) return false;
   for (const k of keyTimeline(doc)) {
     if (k.revoked) continue;
     if (!Number.isNaN(t)) {
