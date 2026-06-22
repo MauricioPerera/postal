@@ -132,12 +132,19 @@ pase esta verificación.
   canonicalización JSON: claves ordenadas por **unidades de código UTF-16**, `JSON.stringify`
   de ECMAScript para primitivas (que ES la serialización de strings y números de RFC 8785), sin
   espacios insignificantes, y orden de array preservado. Probado contra vectores autoritativos
-  (`test/canonical.test.mjs`, 10/0): el vector de números de RFC 8785 §3.2.3, el escaping de
-  strings (formas cortas, `\uXXXX` en minúscula, UTF-8 literal) y la *gotcha* de ordenamiento
-  UTF-16 (un par suplente ordena antes que un BMP en U+E000). Como la forma canónica **no cambió**
-  (la implementación de referencia ya era conforme), fijarla es **no-breaking**: las firmas
-  existentes siguen válidas. La verificación de firma es interoperable con **cualquier**
-  implementación JCS conforme. (Vectores cross-implementación de la suite de referencia: roadmap.)
+  (`test/canonical.test.mjs`, 52/0): el vector de números de RFC 8785 §3.2.3 (más fronteras de
+  notación exponencial, decimales con cero final y redondeo de dobles), el escaping de strings
+  (formas cortas, `\uXXXX` en minúscula, UTF-8 literal) y la *gotcha* de ordenamiento UTF-16 (un
+  par suplente ordena antes que un BMP en U+E000). **Límites fijados explícitamente:** `NaN`/`±Infinity`
+  → `"null"`, enteros > 2^53 pierden precisión (límite inherente de JS, no de JCS), y **no** se
+  aplica normalización Unicode (NFC ≠ NFD serializan distinto, por diseño de JCS).
+  **Fail-closed:** `canonical()` **lanza** ante valores que no son JSON (`undefined`, función,
+  símbolo) en cualquier nivel — antes producía tokens no-JSON (`{"b":undefined}`, `[1,,2]`) que
+  habrían corrompido silenciosamente un payload firmado. Como la forma canónica de todo JSON
+  válido **no cambió** (la implementación de referencia ya era conforme), fijarla y endurecerla es
+  **no-breaking**: las firmas existentes siguen válidas. La verificación de firma es interoperable
+  con **cualquier** implementación JCS conforme. (Vectores cross-implementación de la suite de
+  referencia: roadmap.)
 - **Sellar (solo `message`):** el cuerpo se cifra con clave de contenido AES-256-GCM,
   envuelta por-destinatario vía ECDH **efímero-estático** (clave efímera del emisor por
   mensaje, clave **estática** del destinatario). AAD = metadatos del evento → el sobre no
@@ -222,7 +229,11 @@ colarse al frente. Eso afecta a "el primer claim gana", al trail de auditoría y
 de chat.
 
 `canonicalOrder(items)` define el orden canónico cross-author y es **la única fuente** que
-deben usar las capas de aplicación (en vez de ordenar por `created_at` cada una):
+deben usar las capas de aplicación (en vez de ordenar por `created_at` cada una). El propio
+transporte ya lo aplica: `pollChat` (`src/transport.js`) devuelve los eventos en este orden
+canónico — el mismo que `verifyChat` trata como autoritativo —, no en el orden léxico de path
+en que recorre los archivos (el recorrido del ded‑append-only sigue siendo léxico; solo se
+reordena la salida, y los items no parseables se preservan al final):
 
 - Si un lector respaldado por git adjunta `commitIndex` (la posición del commit que introdujo
   el evento), ordena por él. `commitIndex` **no es un campo dentro del JSON firmado** → el
@@ -260,13 +271,24 @@ Cambios sensibles son eventos `kind:"member"` con `body.op` ∈ `add` | `remove`
 existentes). El gate cuenta **aprobadores distintos autorizados** = el proponente (si
 es owner/admin) más cada `attestation.by` cuya firma valida sobre el payload canónico.
 Política por defecto: `{ add: 1, remove: 2, set_role: 2 }`, sobreescribible en
-`meta.json.governance`. **Implementado y probado** (`test/governance.test.mjs`, 9/9):
+`meta.json.governance`. **Implementado y probado** (`test/governance.test.mjs`, 19/19):
 
 - una sola aprobación es rechazada para `set_role` (`insufficient-quorum`);
 - proponente + atestación de admin lo aprueba;
 - una atestación de un id **no autorizado** no cuenta;
 - una atestación **con la clave equivocada** no cuenta;
-- `op` desconocido se rechaza.
+- `op` desconocido se rechaza (`unknown-member-op`).
+
+**Validación de forma del `body` por kind (fail-closed, en el gate).** Antes de la
+semántica de quórum, `verifyEvent` valida que el `body` tenga la forma de su `kind`
+reservado, en vez de dejar pasar un body malformado y rechazarlo tarde aguas abajo:
+
+- `member` con `op` ∈ {`add`,`remove`,`set_role`} exige `target` string no vacío
+  (`bad-member-target`) y, si trae `role`, que sea uno de {`member`,`admin`,`owner`}
+  (`bad-member-role`);
+- `attest`/`attest-revoke` pasan por el validador canónico `validateAttestation`
+  (`src/trust.js`) — un aval malformado se rechaza **en el gate** (ver §5.1);
+- los **kinds abiertos** (cualquier string no reservado) mantienen su `body` libre.
 
 El proponente y todos los atestadores firman el mismo **payload canónico** (`signedView`:
 el evento sin `sig` ni `attestations`), así añadir atestaciones nunca invalida la firma
@@ -300,6 +322,11 @@ multiplicativo** y profundidad acotada. Reglas fail-safe (probado en `test/trust
   superar la raíz; se clampa y se reporta);
 - **sin fail-silent**: bodies malformados se reportan en `invalid`, no se descartan callados.
 
+Además, desde D10 un `attest`/`attest-revoke` malformado **ni siquiera pasa el gate**:
+`verifyEvent` ejecuta `validateAttestation` (la misma fuente única que usa `activeEdges`),
+así que `subject` ausente o `weight` fuera de `[0,1]` produce `verdict.ok:false` al leer, no
+solo una entrada en `invalid` aguas abajo.
+
 **Límite honesto:** es **reputación permisionada anclada a raíces**, no anti-Sybil ni
 consenso. Una clique de identidades falsas que se avalan entre sí obtiene **cero** confianza
 si ninguna raíz entra en ella; su garantía es "nadie no avalado por tus raíces gana
@@ -317,7 +344,7 @@ Esto **debe** leerse antes de confiar en Postal para confidencialidad:
   **destinatario es estática** y se conserva en `encHistory` a través de rotaciones. Si una
   clave de cifrado (actual o vieja) se filtra, **se lee todo el historial sellado a ella**. La
   rotación protege hacia adelante, no hacia atrás. No hay ratchet/PFS.
-- **Canonicalización: fijada como JCS / RFC 8785** (ver §3, `test/canonical.test.mjs` 10/0). La
+- **Canonicalización: fijada como JCS / RFC 8785 y fail-closed** (ver §3, `test/canonical.test.mjs` 52/0). La
   interop de firma/hash está garantizada con cualquier implementación JCS conforme. (Pendiente
   menor: correr la suite de vectores cross-implementación de referencia.)
 - **Necesita revisión cripto externa.** La composición (canonicalización, nonces GCM, cadena
@@ -346,5 +373,20 @@ Esto **debe** leerse antes de confiar en Postal para confidencialidad:
 ## 8. Implementación de referencia
 
 `src/crypto.js` (primitivas), `src/postal.js` (identidad, eventos, gate),
-`test/postal.test.mjs` (18/18) + 12 suites más (112 tests offline). Isomórfico:
-navegador + Node, solo WebCrypto.
+`test/postal.test.mjs` (18/18) + 21 suites más (**281 tests offline**, `npm test`).
+Isomórfico: navegador + Node, solo WebCrypto. **Cero dependencias.**
+
+**Herramientas de verificación (opt-in, fuera de `npm test`):**
+
+- `test/schema.test.mjs` — **drift guard** sin deps: un mini-validador JSON Schema valida los
+  ejemplos contra `schema/*.json` y asserta que, para cada campo requerido, **tanto** el schema
+  **como** el chequeo inline del gate (`verifyEvent`/`verifyIdentityDoc`) rechazan el objeto
+  incompleto. Si schema e inline divergen, el test rompe (cierra el riesgo de que `schema/` y
+  el código se separen sin avisar).
+- `npm run mutation-audit` (`test/mutation-audit.mjs`) — **mutation audit** del oráculo de firma:
+  inyecta 6 mutaciones en `verify`/`verifyEventSig` (verify trivial, aceptar claves revocadas,
+  ignorar la firma, flip de las ventanas de validez, return final pervertido) y comprueba que la
+  suite mata cada una. **6/6 killed**; restaura `src/` con chequeo de byte-identidad.
+- `npm run coverage` (`test/coverage.mjs`) — **cobertura sin deps** vía `NODE_V8_COVERAGE`: tabla
+  por archivo de funciones/líneas. Baja en `github.js`/`trust.js` (se ejercitan por la suite de
+  integración opt-in, no por `npm test`).
