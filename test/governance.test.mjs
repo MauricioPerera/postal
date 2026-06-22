@@ -1,7 +1,7 @@
 // Governance / quorum tests. Run: node test/governance.test.mjs
 import {
   createIdentity, publicIdentityDoc,
-  buildMemberEvent, applyMemberEvent, verifyEvent, DEFAULT_GOVERNANCE,
+  buildEvent, buildMemberEvent, applyMemberEvent, verifyEvent, DEFAULT_GOVERNANCE,
 } from "../src/postal.js";
 import { canonical, importSignPrivate, sign } from "../src/crypto.js";
 
@@ -84,6 +84,32 @@ ok("two admins cannot remove the owner (cannot-depose-owner)", !r.ok && r.reason
 const downgradeOwner = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:03:00.000Z", rnd: "dno001", op: "set_role", target: owner.id, role: "member" }, [cand]);
 r = await verifyEvent(downgradeOwner, { directory, members });
 ok("two admins cannot downgrade the owner (cannot-depose-owner)", !r.ok && r.reasons.includes("cannot-depose-owner"));
+
+console.log("# body-form gate: attest and member bodies validated in the gate");
+// attest without subject -> rejected in the gate (reuses validateAttestation from trust.js)
+const attNoSub = await buildEvent(owner, { kind: "attest", chat_id: chat, created_at: "2026-06-16T23:30:00.000Z", rnd: "atns", body: { claim: "trusts", weight: 1 } });
+r = await verifyEvent(attNoSub, { directory, members });
+ok("attest without subject rejected in gate (bad-subject)", !r.ok && r.reasons.includes("bad-subject"));
+
+// attest weight out of range -> rejected in the gate
+const attBadW = await buildEvent(owner, { kind: "attest", chat_id: chat, created_at: "2026-06-16T23:31:00.000Z", rnd: "atbw", body: { subject: cand.id, claim: "trusts", weight: 5 } });
+r = await verifyEvent(attBadW, { directory, members });
+ok("attest weight out of range rejected in gate (weight-out-of-range)", !r.ok && r.reasons.includes("weight-out-of-range"));
+
+// well-formed attest passes the gate
+const attOk = await buildEvent(owner, { kind: "attest", chat_id: chat, created_at: "2026-06-16T23:32:00.000Z", rnd: "atok", body: { subject: cand.id, claim: "trusts", weight: 0.8 } });
+r = await verifyEvent(attOk, { directory, members });
+ok("well-formed attest passes the gate", r.ok);
+
+// member add without target -> rejected in the gate (empty string = missing target)
+const memNoTarget = await buildMemberEvent(owner, { ...base, created_at: "2026-06-16T23:33:00.000Z", rnd: "mnt", op: "add", target: "" });
+r = await verifyEvent(memNoTarget, { directory, members });
+ok("member add without target rejected in gate (bad-member-target)", !r.ok && r.reasons.includes("bad-member-target"));
+
+// member set_role with an invalid role -> rejected in the gate
+const memBadRole = await buildMemberEvent(owner, { ...base, created_at: "2026-06-16T23:34:00.000Z", rnd: "mbr", op: "set_role", target: cand.id, role: "superuser" });
+r = await verifyEvent(memBadRole, { directory, members });
+ok("member set_role with invalid role rejected in gate (bad-member-role)", !r.ok && r.reasons.includes("bad-member-role"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
