@@ -85,6 +85,19 @@ const downgradeOwner = await buildMemberEvent(admin, { ...base, created_at: "202
 r = await verifyEvent(downgradeOwner, { directory, members });
 ok("two admins cannot downgrade the owner (cannot-depose-owner)", !r.ok && r.reasons.includes("cannot-depose-owner"));
 
+// (c) two colluding admins CANNOT demote a third admin to member without the owner.
+// members here: owner A, admin B, admin C. B (admin, not owner) proposes demoting C
+// (admin) to member, with a valid admin attestation that would otherwise meet the
+// set_role quorum (2) — rejected because only the owner may demote an admin.
+const demoteByAdmin = await buildMemberEvent(admin, { ...base, created_at: "2026-06-16T22:04:00.000Z", rnd: "dma001", op: "set_role", target: cand.id, role: "member" }, [cand]);
+r = await verifyEvent(demoteByAdmin, { directory, members });
+ok("a non-owner admin cannot demote an admin (only-owner-demotes-admin)", !r.ok && r.reasons.includes("only-owner-demotes-admin"));
+
+// the same demotion proposed by the owner A + 1 admin attestation (quorum set_role=2) passes.
+const demoteByOwner = await buildMemberEvent(owner, { ...base, created_at: "2026-06-16T22:05:00.000Z", rnd: "dma002", op: "set_role", target: cand.id, role: "member" }, [admin]);
+r = await verifyEvent(demoteByOwner, { directory, members });
+ok("owner + admin attestation can demote an admin (quorum met)", r.ok);
+
 console.log("# body-form gate: attest and member bodies validated in the gate");
 // attest without subject -> rejected in the gate (reuses validateAttestation from trust.js)
 const attNoSub = await buildEvent(owner, { kind: "attest", chat_id: chat, created_at: "2026-06-16T23:30:00.000Z", rnd: "atns", body: { claim: "trusts", weight: 1 } });

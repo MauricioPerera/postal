@@ -469,10 +469,14 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
     } else if (members) {
       const ownerId = (members.find((m) => m.role === "owner") || {}).id;
       const promoting = (op === "add" || op === "set_role") && (ev.body.role === "admin" || ev.body.role === "owner");
+      const targetRole = (members.find((m) => m.id === ev.body.target) || {}).role;
+      const demotingAdmin = op === "set_role" && targetRole === "admin" && ev.body.role !== "admin" && ev.body.role !== "owner";
       if (ownerId && ev.body.target === ownerId && (op === "remove" || op === "set_role")) {
         reasons.push("cannot-depose-owner");
       } else if (promoting && ev.from !== ownerId) {
         reasons.push("only-owner-promotes");
+      } else if (demotingAdmin && ev.from !== ownerId) {
+        reasons.push("only-owner-demotes-admin");
       } else {
         const need = policy[op];
         const have = await countApprovers(ev, directory, members);
