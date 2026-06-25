@@ -7,7 +7,8 @@
 // + signature + append-only, checked at read-time AND in CI.
 
 import {
-  canonical, fingerprintId, humanFingerprint, sha256, utf8Bytes,
+  canonical, fingerprintId, humanFingerprint, sha256, utf8Bytes, utf8Text,
+  bytesToBase64, base64ToBytes,
   generateSignKeypair, generateEncKeypair,
   importSignPublic, importSignPrivate, sign, verify,
   sealForRecipients, openSealed,
@@ -170,7 +171,11 @@ export async function verifyChatMeta(meta, { directory, chatId } = {}) {
   if (reasons.length) return { ok: false, reasons };
 
   R(chatId && meta.id !== chatId, "meta-id-mismatch");
-  R(!String(meta.id).includes(meta.created_by), "chat-id-not-bound-to-creator");
+  // The chat id must be canonically bound to its creator: a substring match would
+  // let `c_X_<rnd>` pass for an id that merely mentions X (e.g. `c_Y_XZ_1`), opening
+  // a forgery where a meta is swapped onto someone else's chat. Require the exact
+  // `c_<created_by>_` prefix that newChatId produces.
+  R(!String(meta.id).startsWith("c_" + meta.created_by + "_"), "chat-id-not-bound-to-creator");
 
   const creator = directory && directory[meta.created_by];
   if (!creator) {
@@ -228,7 +233,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
 
 async function sealEnvelope(text, recipients, aad) {
   const sealed = await sealForRecipients(String(text || ""), recipients, aad);
-  return btoa(unescape(encodeURIComponent(JSON.stringify(sealed))));
+  return bytesToBase64(utf8Bytes(JSON.stringify(sealed)));
 }
 
 // The canonical signed payload: everything EXCEPT the signature and the
@@ -294,7 +299,7 @@ export async function openMessage(ev, identity) {
   if (ev.kind !== "message" || !ev.body || !ev.body.sealed) return null;
   const raw = String(ev.body.sealed);
   if (raw.indexOf(MARKER) !== 0) return null;
-  const sealed = JSON.parse(decodeURIComponent(escape(atob(raw.slice(MARKER.length)))));
+  const sealed = JSON.parse(utf8Text(base64ToBytes(raw.slice(MARKER.length))));
   const aad = canonical({ chat_id: ev.chat_id, from: ev.from, to: ev.to, id: ev.id, created_at: ev.created_at });
   // Try the current enc key, then any rotated-out enc keys (old sealed messages
   // were wrapped to a previous enc key).
@@ -438,6 +443,34 @@ function _checkEnvelopeShape(ev) {
   return reasons;
 }
 
+// 1c. field formats: the schema is NOT enforced at runtime, so the gate must reject
+//     `from`/`chat_id` shapes that would poison eventPath (path traversal via '/' or
+//     '..'). `from` is a 16-hex-char identity fingerprint; `chat_id` is the newChatId
+//     form `c_<from>_<rnd>` or an app id, restricted to path-safe chars.
+function _isBadFromFormat(e) { return e && !/^[0-9A-F]{16}$/.test(e.from); }
+function _isBadChatIdFormat(e) { return e && !/^[A-Za-z0-9_-]+$/.test(e.chat_id); }
+function _checkFieldFormats(ev) {
+  const reasons = [];
+  if (_isBadFromFormat(ev)) reasons.push("bad-from-format");
+  if (_isBadChatIdFormat(ev)) reasons.push("bad-chat-id-format");
+  return reasons;
+}
+
+// 2. id determinism + safe suffix. The id is `${created_at}:${from}:${rnd}` with
+//    [:.]->-; the prefix must encode created_at+from (non-deterministic-id otherwise),
+//    AND the free suffix must be non-empty path-safe [A-Za-z0-9-] so an adversary
+//    cannot smuggle '/' or '..' into the id (which eventPath would splice into a path).
+function _idPrefix(ev) {
+  return ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
+}
+function _checkIdFormat(ev) {
+  const prefix = _idPrefix(ev);
+  if (ev.id.indexOf(prefix) !== 0) return ["non-deterministic-id"];
+  const suffix = ev.id.slice(prefix.length);
+  return suffix && /^[A-Za-z0-9-]+$/.test(suffix) ? [] : ["bad-id-format"];
+}
+
+
 // 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
 //     open kinds stay free-form. The attest validator is the canonical one from
 //     trust.js (single source of truth) — a malformed attest is rejected HERE,
@@ -520,7 +553,18 @@ async function _checkMemberGovernance(ev, { directory, members, governance }) {
   return have < need ? [`insufficient-quorum(${have}/${need})`] : [];
 }
 
-export async function verifyEvent(ev, { directory, seenPaths, members, governance } = {}) {
+// Governance note: quorum / root-of-trust invariants are ONLY enforced when
+// `members` is provided. Verifying a loose event without members cannot impose a
+// quorum (it has no membership state to count against); that replay-time quorum
+// is enforced by verifyChat, which rebuilds membership and feeds it in here.
+// `chatId` (optional): when a caller knows which chat it is replaying, an event
+// signed for another chat must be rejected (anti cross-chat replay). Omitting it
+// keeps backward-compatible behavior for callers/tests that predate this guard.
+function _chatIdMismatch(ev, chatId) {
+  return chatId && ev.chat_id !== chatId;
+}
+
+export async function verifyEvent(ev, { directory, seenPaths, members, governance, chatId } = {}) {
   const reasons = [];
   const R = (c, m) => { if (c) reasons.push(m); };
 
@@ -528,14 +572,21 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   const shapeReasons = _checkEnvelopeShape(ev);
   if (shapeReasons.length) return { ok: false, reasons: shapeReasons };
 
+  // 1a. chat binding: a signed event is valid ONLY for the chat it claims.
+  //     Without this, an event valid for chat B could be dropped into chat A's
+  //     directory and pass (cross-chat replay).
+  R(_chatIdMismatch(ev, chatId), "chat-id-mismatch");
+
   // 1b. body shape per kind (fail-closed)
   const body = _checkKindBody(ev);
   if (body.halt) return { ok: false, reasons: body.reasons };
   reasons.push(...body.reasons);
 
-  // 2. path determinism: id must encode created_at + from
-  const expectIdPrefix = ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
-  R(ev.id.indexOf(expectIdPrefix) !== 0, "non-deterministic-id");
+  // 1c. field formats (from / chat_id) — runtime shape the schema does not enforce.
+  reasons.push(..._checkFieldFormats(ev));
+
+  // 2. path determinism: id must encode created_at + from, with a path-safe suffix.
+  reasons.push(..._checkIdFormat(ev));
 
   // 3. signature valid against ANY of the author's keys (current or rotated-out),
   //    so events signed before a key rotation remain verifiable.
@@ -577,7 +628,7 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 // needs the full quorum. This avoids a single-owner deadlock.
 //
 // items: [{ path, event }]. Returns { ok, members, results:[{path,verdict}], failures }.
-export async function verifyChat(items, { directory, genesisOwner, governance } = {}) {
+export async function verifyChat(items, { directory, genesisOwner, governance, chatId } = {}) {
   // Canonical cross-author order: commit-anchored when a git reader attached `commitIndex`,
   // else created_at+id (identical to the historical behavior). See order.js.
   const sorted = canonicalOrder(items.filter((it) => it && it.event));
@@ -589,7 +640,7 @@ export async function verifyChat(items, { directory, genesisOwner, governance } 
 
   for (const it of sorted) {
     const ev = it.event;
-    const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
+    const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance, chatId });
     results.push({ path: it.path, verdict });
     if (!verdict.ok) { failures.push({ path: it.path, reasons: verdict.reasons }); continue; }
     seenPaths.add(eventPath(ev.chat_id, ev));   // only a VALID event reserves its path: an invalid
