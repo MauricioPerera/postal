@@ -110,6 +110,26 @@ async function decryptString(key, e, aad = "") {
 async function deriveWrapKey(priv, pub) {
   return subtle.deriveKey({ name: "ECDH", public: pub }, priv, { name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"]);
 }
+
+// HKDF-SHA256 domain separation for the wrap key (alg v2). The ECDH shared secret is
+// fed through HKDF with a fixed salt + info, so the AES wrap key is bound to the
+// "postal ecdh-wrap" domain instead of being the raw ECDH secret. Legacy envelopes
+// (alg without "HKDF") keep using deriveWrapKey above — backward compatibility.
+const HKDF_SALT = utf8Bytes("postal/v1/hkdf-salt");
+const HKDF_INFO = utf8Bytes("postal/v1/ecdh-wrap");
+async function deriveWrapKeyHKDF(priv, pub) {
+  const shared = await subtle.deriveBits({ name: "ECDH", public: pub }, priv, 256);
+  const ikm = await subtle.importKey("raw", shared, { name: "HKDF" }, false, ["deriveKey"]);
+  return subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: HKDF_SALT, info: HKDF_INFO },
+    ikm, { name: "AES-GCM", length: 256 }, false, ["wrapKey", "unwrapKey"]
+  );
+}
+
+// Select the wrap-key derivation from the envelope alg: HKDF for v2, legacy ECDH-direct
+// for v1. Centralizes the version branch so open paths stay linear.
+const wrapKeyFor = (alg, priv, eph) =>
+  (Boolean(alg) && String(alg).includes("HKDF")) ? deriveWrapKeyHKDF(priv, eph) : deriveWrapKey(priv, eph);
 const newContentKey = () => subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
 async function newEphemeral() {
   const kp = await subtle.generateKey(ECDH, true, ["deriveKey", "deriveBits"]);
@@ -126,12 +146,12 @@ export async function sealForRecipients(plaintext, recipients, aad = "") {
   const keys = {};
   for (const r of recipients) {
     const pub = await importEncPublic(r.encPublicKey);
-    const wk = await deriveWrapKey(eph.privateKey, pub);
+    const wk = await deriveWrapKeyHKDF(eph.privateKey, pub);
     const iv = randomBytes(IV_BYTES);
     const wrapped = await subtle.wrapKey("raw", cek, wk, { name: "AES-GCM", iv, additionalData: utf8Bytes(aad + "|rcpt:" + r.id) });
     keys[r.id] = { iv: bytesToBase64(iv), ct: bytesToBase64(new Uint8Array(wrapped)) };
   }
-  return { alg: "ECDH-P256+AES-256-GCM", epk: eph.publicKey, iv: body.iv, ct: body.ct, keys };
+  return { alg: "ECDH-P256+HKDF-SHA256+AES-256-GCM", epk: eph.publicKey, iv: body.iv, ct: body.ct, keys };
 }
 
 // Open a sealed envelope as recipient `id` with their ECDH private key.
@@ -140,7 +160,7 @@ export async function openSealed(sealed, id, encPrivateJwk, aad = "") {
   if (!mine) throw new Error("not a recipient");
   const priv = await importEncPrivate(encPrivateJwk);
   const eph = await importEncPublic(sealed.epk);
-  const wk = await deriveWrapKey(priv, eph);
+  const wk = await wrapKeyFor(sealed.alg, priv, eph);
   const cek = await subtle.unwrapKey(
     "raw", base64ToBytes(mine.ct), wk,
     { name: "AES-GCM", iv: base64ToBytes(mine.iv), additionalData: utf8Bytes(aad + "|rcpt:" + id) },
@@ -185,12 +205,12 @@ export async function sealAnonymous(plaintext, recipientPubs, aad = "", { keySlo
   const eph = await newEphemeral();
 
   // pad the plaintext to a size bucket before encrypting (hide length)
-  const padded = String(plaintext) + " ".repeat(Math.max(0, padToBucket(String(plaintext).length, sizeBucket) - String(plaintext).length));
+  const padded = String(plaintext) + " ".repeat(Math.max(0, padToBucket(String(plaintext).length, sizeBucket) - String(plaintext).length));
   const body = await encryptString(cek, padded, aad);
 
   const wraps = [];
   for (const pubB64 of recipientPubs) {
-    const wk = await deriveWrapKey(eph.privateKey, await importEncPublic(pubB64));
+    const wk = await deriveWrapKeyHKDF(eph.privateKey, await importEncPublic(pubB64));
     const iv = randomBytes(IV_BYTES);
     const wrapped = await subtle.wrapKey("raw", cek, wk, { name: "AES-GCM", iv, additionalData: utf8Bytes(aad) });
     wraps.push({ iv: bytesToBase64(iv), ct: bytesToBase64(new Uint8Array(wrapped)) });
@@ -201,7 +221,7 @@ export async function sealAnonymous(plaintext, recipientPubs, aad = "", { keySlo
     wraps.push({ iv: bytesToBase64(randomBytes(IV_BYTES)), ct: bytesToBase64(randomBytes(48)) });
   }
 
-  return { alg: "ECDH-P256+AES-256-GCM/anon", epk: eph.publicKey, iv: body.iv, ct: body.ct, w: shuffle(wraps) };
+  return { alg: "ECDH-P256+HKDF-SHA256+AES-256-GCM/anon", epk: eph.publicKey, iv: body.iv, ct: body.ct, w: shuffle(wraps) };
 }
 
 // Try every wrap until one yields the content key, then decrypt. Returns the
@@ -209,7 +229,7 @@ export async function sealAnonymous(plaintext, recipientPubs, aad = "", { keySlo
 export async function openAnonymous(env, encPrivateJwk, aad = "") {
   const priv = await importEncPrivate(encPrivateJwk);
   const eph = await importEncPublic(env.epk);
-  const wk = await deriveWrapKey(priv, eph);
+  const wk = await wrapKeyFor(env.alg, priv, eph);
   for (const wrap of env.w || []) {
     try {
       const cek = await subtle.unwrapKey(
@@ -218,7 +238,7 @@ export async function openAnonymous(env, encPrivateJwk, aad = "") {
         { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
       );
       const out = await decryptString(cek, { iv: env.iv, ct: env.ct }, aad);
-      return out.replace(/ +$/, ""); // trim size padding
+      return out.replace(/ +$/, ""); // trim size padding
     } catch { /* not our slot, keep trying */ }
   }
   throw new Error("not a recipient");
