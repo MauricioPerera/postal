@@ -408,34 +408,130 @@ async function countApprovers(ev, directory, members) {
 // `directory` maps id -> verified public identity doc. `seenPaths` enforces
 // append-only. `members` is the chat membership for authorization. `governance`
 // overrides the default quorum policy for member events.
+
+// 1. schema-lite: required envelope shape. Returns reasons (empty = ok).
+// Open kinds: any non-empty string is a valid signed record. Reserved kinds keep
+// special semantics (member -> governance, message -> sealing); apps define their own.
+// Per-field predicates. Each lives in its own scope so its `||`/`&&` count
+// toward its own (small) complexity, not toward _checkEnvelopeShape's. The
+// conditions are identical to the historical R(...) calls.
+function _isBadVersion(e) { return !e || e.v !== VERSION; }
+function _isBadKind(e) { return !e || typeof e.kind !== "string" || !e.kind.trim(); }
+function _isMissingFields(e) { return !e || !e.from || !e.chat_id || !e.id || !e.created_at; }
+function _isToNotArray(e) { return e && !Array.isArray(e.to); }
+function _isBadDate(e) { return e && Number.isNaN(Date.parse(e.created_at || "")); }
+function _isMissingSig(e) { return e && !e.sig; }
+
+function _checkEnvelopeShape(ev) {
+  const reasons = [];
+  // Data-driven: iterate [predicate, reason] and push reason when the predicate
+  // holds. Same 6 reasons and conditions as the old R(...) chain.
+  const checks = [
+    [_isBadVersion, "bad-version"],
+    [_isBadKind, "bad-kind"],
+    [_isMissingFields, "missing-fields"],
+    [_isToNotArray, "to-not-array"],
+    [_isBadDate, "bad-date"],
+    [_isMissingSig, "missing-signature"],
+  ];
+  for (const [pred, reason] of checks) if (pred(ev)) reasons.push(reason);
+  return reasons;
+}
+
+// 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
+//     open kinds stay free-form. The attest validator is the canonical one from
+//     trust.js (single source of truth) — a malformed attest is rejected HERE,
+//     not silently surfaced later as 'invalid' by activeEdges.
+// Returns { reasons, halt }: halt=true means fail-closed immediately (attest case).
+// 1b-member: body shape for the "member" kind. Extracted from _checkKindBody so
+// the parent stays thin; reasons are bad-member-target / bad-member-role.
+function _checkMemberBody(ev) {
+  const reasons = [];
+  const b = ev.body || {};
+  if ((b.op === "add" || b.op === "remove" || b.op === "set_role") &&
+      (typeof b.target !== "string" || !b.target)) reasons.push("bad-member-target");
+  if (b.role != null && !["member", "admin", "owner"].includes(b.role)) reasons.push("bad-member-role");
+  return reasons;
+}
+
+// Returns { reasons, halt }: halt=true means fail-closed immediately (attest case).
+function _checkKindBody(ev) {
+  if (ev.kind === "attest" || ev.kind === "attest-revoke") {
+    const av = validateAttestation(ev);
+    return av.ok ? { reasons: [], halt: false } : { reasons: av.reasons, halt: true };
+  }
+  if (ev.kind === "member") return { reasons: _checkMemberBody(ev), halt: false };
+  return { reasons: [], halt: false };
+}
+
+// 5. governance: membership changes need a quorum of authorized approvers, PLUS two
+//    root-of-trust invariants that a quorum alone cannot override:
+//      (a) the genesis owner cannot be removed or have its role changed by anyone, and
+//      (b) only the owner may promote to admin/owner — so a lone admin cannot mint a
+//          complice admin and then form a quorum to depose the owner.
+
+const _ownerId = (members) => (members.find((m) => m.role === "owner") || {}).id;
+
+// Invariant (a): the genesis owner is untouchable by remove/set_role.
+function _deposingOwnerReason(ev, members, op) {
+  const ownerId = _ownerId(members);
+  if (ownerId && ev.body.target === ownerId && (op === "remove" || op === "set_role")) {
+    return "cannot-depose-owner";
+  }
+  return null;
+}
+
+// Invariant (b)-promote: only the owner may promote to admin/owner.
+function _promotingReason(ev, members, op) {
+  const promoting = (op === "add" || op === "set_role") && (ev.body.role === "admin" || ev.body.role === "owner");
+  if (promoting && ev.from !== _ownerId(members)) return "only-owner-promotes";
+  return null;
+}
+
+// Invariant (b)-demote: only the owner may demote an admin.
+function _demotingAdminReason(ev, members, op) {
+  if (op !== "set_role") return null;
+  const targetRole = (members.find((m) => m.id === ev.body.target) || {}).role;
+  const demoting = targetRole === "admin" && ev.body.role !== "admin" && ev.body.role !== "owner";
+  if (demoting && ev.from !== _ownerId(members)) return "only-owner-demotes-admin";
+  return null;
+}
+
+// Returns the first applicable invariant-violation reason, or null. Priority order
+// matches the historical if/else-if chain: depose > promote > demote.
+function _governanceInvariantReason(ev, members, op) {
+  return _deposingOwnerReason(ev, members, op)
+    || _promotingReason(ev, members, op)
+    || _demotingAdminReason(ev, members, op);
+}
+
+// Returns reasons to push (may be empty).
+async function _checkMemberGovernance(ev, { directory, members, governance }) {
+  const op = ev.body && ev.body.op;
+  const policy = Object.assign({}, DEFAULT_GOVERNANCE, governance || {});
+  if (!op || !(op in policy)) return ["unknown-member-op"];
+  if (!members) return [];
+
+  const invariant = _governanceInvariantReason(ev, members, op);
+  if (invariant) return [invariant];
+
+  const need = policy[op];
+  const have = await countApprovers(ev, directory, members);
+  return have < need ? [`insufficient-quorum(${have}/${need})`] : [];
+}
+
 export async function verifyEvent(ev, { directory, seenPaths, members, governance } = {}) {
   const reasons = [];
   const R = (c, m) => { if (c) reasons.push(m); };
 
   // 1. schema-lite: required shape
-  R(!ev || ev.v !== VERSION, "bad-version");
-  // Open kinds: any non-empty string is a valid signed record. Reserved kinds keep
-  // special semantics (member -> governance, message -> sealing); apps define their own.
-  R(!ev || typeof ev.kind !== "string" || !ev.kind.trim(), "bad-kind");
-  R(!ev || !ev.from || !ev.chat_id || !ev.id || !ev.created_at, "missing-fields");
-  R(ev && !Array.isArray(ev.to), "to-not-array");
-  R(ev && Number.isNaN(Date.parse(ev.created_at || "")), "bad-date");
-  R(ev && !ev.sig, "missing-signature");
-  if (reasons.length) return { ok: false, reasons };
+  const shapeReasons = _checkEnvelopeShape(ev);
+  if (shapeReasons.length) return { ok: false, reasons: shapeReasons };
 
-  // 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
-  //     open kinds stay free-form. The attest validator is the canonical one from
-  //     trust.js (single source of truth) — a malformed attest is rejected HERE,
-  //     not silently surfaced later as 'invalid' by activeEdges.
-  if (ev.kind === "attest" || ev.kind === "attest-revoke") {
-    const av = validateAttestation(ev);
-    if (!av.ok) { reasons.push(...av.reasons); return { ok: false, reasons }; }
-  } else if (ev.kind === "member") {
-    const b = ev.body || {};
-    if ((b.op === "add" || b.op === "remove" || b.op === "set_role") &&
-        (typeof b.target !== "string" || !b.target)) reasons.push("bad-member-target");
-    if (b.role != null && !["member", "admin", "owner"].includes(b.role)) reasons.push("bad-member-role");
-  }
+  // 1b. body shape per kind (fail-closed)
+  const body = _checkKindBody(ev);
+  if (body.halt) return { ok: false, reasons: body.reasons };
+  reasons.push(...body.reasons);
 
   // 2. path determinism: id must encode created_at + from
   const expectIdPrefix = ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
@@ -456,33 +552,9 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
     R(!members.some((m) => m.id === ev.from), "author-not-member");
   }
 
-  // 5. governance: membership changes need a quorum of authorized approvers, PLUS two
-  //    root-of-trust invariants that a quorum alone cannot override:
-  //      (a) the genesis owner cannot be removed or have its role changed by anyone, and
-  //      (b) only the owner may promote to admin/owner — so a lone admin cannot mint a
-  //          complice admin and then form a quorum to depose the owner.
+  // 5. governance (member events only)
   if (ev.kind === "member") {
-    const op = ev.body && ev.body.op;
-    const policy = Object.assign({}, DEFAULT_GOVERNANCE, governance || {});
-    if (!op || !(op in policy)) {
-      reasons.push("unknown-member-op");
-    } else if (members) {
-      const ownerId = (members.find((m) => m.role === "owner") || {}).id;
-      const promoting = (op === "add" || op === "set_role") && (ev.body.role === "admin" || ev.body.role === "owner");
-      const targetRole = (members.find((m) => m.id === ev.body.target) || {}).role;
-      const demotingAdmin = op === "set_role" && targetRole === "admin" && ev.body.role !== "admin" && ev.body.role !== "owner";
-      if (ownerId && ev.body.target === ownerId && (op === "remove" || op === "set_role")) {
-        reasons.push("cannot-depose-owner");
-      } else if (promoting && ev.from !== ownerId) {
-        reasons.push("only-owner-promotes");
-      } else if (demotingAdmin && ev.from !== ownerId) {
-        reasons.push("only-owner-demotes-admin");
-      } else {
-        const need = policy[op];
-        const have = await countApprovers(ev, directory, members);
-        R(have < need, `insufficient-quorum(${have}/${need})`);
-      }
-    }
+    reasons.push(...await _checkMemberGovernance(ev, { directory, members, governance }));
   }
 
   // 6. append-only: this path must not already exist
