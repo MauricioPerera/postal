@@ -115,7 +115,7 @@ export async function pollChat(client, identity, chat_id, { directory, members }
   // Trusted chat: run the FULL gate over all events at once. verifyChat derives
   // membership from member events (genesis owner seeded from the meta) and
   // returns per-path verdicts plus cross-author hash-chain failures.
-  const res = await verifyChat(items, { directory, genesisOwner: meta.created_by, governance: meta.governance });
+  const res = await verifyChat(items, { directory, genesisOwner: meta.created_by, governance: meta.governance, chatId: chat_id });
 
   // Build path -> verdict from res.results, then fold in res.failures: a failure
   // only OVERWRITES a verdict if that path isn't already ok=false (verifyChat's own

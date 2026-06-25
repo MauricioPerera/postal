@@ -520,13 +520,29 @@ async function _checkMemberGovernance(ev, { directory, members, governance }) {
   return have < need ? [`insufficient-quorum(${have}/${need})`] : [];
 }
 
-export async function verifyEvent(ev, { directory, seenPaths, members, governance } = {}) {
+// Governance note: quorum / root-of-trust invariants are ONLY enforced when
+// `members` is provided. Verifying a loose event without members cannot impose a
+// quorum (it has no membership state to count against); that replay-time quorum
+// is enforced by verifyChat, which rebuilds membership and feeds it in here.
+// `chatId` (optional): when a caller knows which chat it is replaying, an event
+// signed for another chat must be rejected (anti cross-chat replay). Omitting it
+// keeps backward-compatible behavior for callers/tests that predate this guard.
+function _chatIdMismatch(ev, chatId) {
+  return chatId && ev.chat_id !== chatId;
+}
+
+export async function verifyEvent(ev, { directory, seenPaths, members, governance, chatId } = {}) {
   const reasons = [];
   const R = (c, m) => { if (c) reasons.push(m); };
 
   // 1. schema-lite: required shape
   const shapeReasons = _checkEnvelopeShape(ev);
   if (shapeReasons.length) return { ok: false, reasons: shapeReasons };
+
+  // 1a. chat binding: a signed event is valid ONLY for the chat it claims.
+  //     Without this, an event valid for chat B could be dropped into chat A's
+  //     directory and pass (cross-chat replay).
+  R(_chatIdMismatch(ev, chatId), "chat-id-mismatch");
 
   // 1b. body shape per kind (fail-closed)
   const body = _checkKindBody(ev);
@@ -577,7 +593,7 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
 // needs the full quorum. This avoids a single-owner deadlock.
 //
 // items: [{ path, event }]. Returns { ok, members, results:[{path,verdict}], failures }.
-export async function verifyChat(items, { directory, genesisOwner, governance } = {}) {
+export async function verifyChat(items, { directory, genesisOwner, governance, chatId } = {}) {
   // Canonical cross-author order: commit-anchored when a git reader attached `commitIndex`,
   // else created_at+id (identical to the historical behavior). See order.js.
   const sorted = canonicalOrder(items.filter((it) => it && it.event));
@@ -589,7 +605,7 @@ export async function verifyChat(items, { directory, genesisOwner, governance } 
 
   for (const it of sorted) {
     const ev = it.event;
-    const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance });
+    const verdict = await verifyEvent(ev, { directory, members, seenPaths, governance, chatId });
     results.push({ path: it.path, verdict });
     if (!verdict.ok) { failures.push({ path: it.path, reasons: verdict.reasons }); continue; }
     seenPaths.add(eventPath(ev.chat_id, ev));   // only a VALID event reserves its path: an invalid

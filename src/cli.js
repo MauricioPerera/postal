@@ -68,7 +68,7 @@ export async function verifyRepo(repoRoot) {
       items.push({ path: rel, event });
     }
 
-    const chatResult = await verifyChat(items, { directory, genesisOwner, governance });
+    const chatResult = await verifyChat(items, { directory, genesisOwner, governance, chatId: chat });
     for (const f of chatResult.failures) failures.push(f);
   }
 
