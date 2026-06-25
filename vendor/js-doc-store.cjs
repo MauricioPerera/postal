@@ -132,9 +132,16 @@ function _getNestedValue(obj, path) {
   return current;
 }
 
+// Prototype-pollution guard: segments that must never be used as object keys.
+const _DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 function _setNestedValue(obj, path, value) {
-  if (!path.includes('.')) { obj[path] = value; return; }
+  if (!path.includes('.')) {
+    if (_DANGEROUS_KEYS.has(path)) return; // silent defense — do not mutate
+    obj[path] = value; return;
+  }
   const parts = path.split('.');
+  for (const p of parts) { if (_DANGEROUS_KEYS.has(p)) return; }
   let current = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     if (current[parts[i]] == null) current[parts[i]] = {};
@@ -144,8 +151,12 @@ function _setNestedValue(obj, path, value) {
 }
 
 function _deleteNestedValue(obj, path) {
-  if (!path.includes('.')) { delete obj[path]; return; }
+  if (!path.includes('.')) {
+    if (_DANGEROUS_KEYS.has(path)) return; // silent defense — do not mutate
+    delete obj[path]; return;
+  }
   const parts = path.split('.');
+  for (const p of parts) { if (_DANGEROUS_KEYS.has(p)) return; }
   let current = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     if (current[parts[i]] == null) return;
