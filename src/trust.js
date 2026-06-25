@@ -10,7 +10,10 @@
 //   - malformed bodies surfaced in `invalid`, never silently dropped.
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
-const edgeKey = (from, subject, claim) => JSON.stringify([from, subject, claim ?? null]);
+// Edge identity is scoped per chat: an attest / attest-revoke emitted in chat B
+// can no longer collide with (or revoke) one of the same (from, subject, claim)
+// emitted in chat A. chat_id ?? null keeps backward compat for legacy events.
+const edgeKey = (from, subject, claim, chat_id) => JSON.stringify([from, subject, claim ?? null, chat_id ?? null]);
 
 // Validate an attest / attest-revoke body. Returns { ok, reasons }.
 export function validateAttestation(ev) {
@@ -27,13 +30,17 @@ export function validateAttestation(ev) {
   return { ok: reasons.length === 0, reasons };
 }
 
-// Latest event per (attester, subject, claim) wins; expired/malformed handled safely.
+// Latest event per (attester, subject, claim, chat) wins; expired/malformed handled safely.
+// If `chatId` is passed (truthy), only events whose e.chat_id === chatId are considered
+// (filtered up front, before ordering). Without `chatId`, all events are considered but
+// edges are still scoped per chat via edgeKey, so cross-chat attests/revokees never collide.
 // Returns { edges, invalid }.
-export function activeEdges(verifiedEvents, { now = new Date().toISOString() } = {}) {
+export function activeEdges(verifiedEvents, { now = new Date().toISOString(), chatId = null } = {}) {
   const latest = new Map();
   const invalid = [];
   const ordered = [...verifiedEvents]
     .filter((e) => e.kind === "attest" || e.kind === "attest-revoke")
+    .filter((e) => !chatId || e.chat_id === chatId)
     .sort((a, b) => (a.created_at !== b.created_at ? (a.created_at < b.created_at ? -1 : 1) : (a.id < b.id ? -1 : 1)));
 
   for (const e of ordered) {
@@ -41,21 +48,22 @@ export function activeEdges(verifiedEvents, { now = new Date().toISOString() } =
     const fatal = v.reasons.filter((r) => r !== "weight-out-of-range");
     if (fatal.length) { invalid.push({ event_id: e.id, from: e.from, reasons: fatal }); continue; }
     if (v.reasons.includes("weight-out-of-range")) invalid.push({ event_id: e.id, from: e.from, reasons: ["weight-out-of-range"], note: "clamped to [0,1]" });
-    latest.set(edgeKey(e.from, e.body.subject, e.body.claim), e);
+    latest.set(edgeKey(e.from, e.body.subject, e.body.claim, e.chat_id), e);
   }
 
   const edges = [];
   for (const e of latest.values()) {
     if (e.kind !== "attest") continue;
     if (now && e.body.expires && Date.parse(e.body.expires) <= Date.parse(now)) continue;
-    edges.push({ from: e.from, to: e.body.subject, claim: e.body.claim, weight: clamp01(Number(e.body.weight ?? 1)), event_id: e.id });
+    edges.push({ from: e.from, to: e.body.subject, claim: e.body.claim, weight: clamp01(Number(e.body.weight ?? 1)), event_id: e.id, chat_id: e.chat_id ?? null });
   }
   return { edges, invalid };
 }
 
 // Max-trust-path propagation from roots with multiplicative decay and bounded depth.
-export function resolveTrust(verifiedEvents, { roots, decay = 0.5, maxDepth = 4, now = new Date().toISOString() } = {}) {
-  const { edges, invalid } = activeEdges(verifiedEvents, { now });
+// `chatId` (optional, truthy) scopes the resolution to a single chat; propagated to activeEdges.
+export function resolveTrust(verifiedEvents, { roots, decay = 0.5, maxDepth = 4, now = new Date().toISOString(), chatId = null } = {}) {
+  const { edges, invalid } = activeEdges(verifiedEvents, { now, chatId });
   const trust = new Map();
   for (const r of Object.keys(roots || {})) trust.set(r, roots[r] ?? 1);
 
