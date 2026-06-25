@@ -319,8 +319,10 @@ export async function openMessage(ev, identity) {
   const sealed = JSON.parse(utf8Text(base64ToBytes(raw.slice(MARKER.length))));
   const aad = canonical({ chat_id: ev.chat_id, from: ev.from, to: ev.to, id: ev.id, created_at: ev.created_at });
   // Try the current enc key, then any rotated-out enc keys (old sealed messages
-  // were wrapped to a previous enc key).
-  const candidates = [identity.enc, ...(identity.encHistory || [])];
+  // were wrapped to a previous enc key). encHistory may contain null tombstones
+  // after a prune (see pruneEncKeys); filter falsy so a tombstone slot is skipped
+  // rather than trial-decrypted (covers both the anon and labeled branches below).
+  const candidates = [identity.enc, ...(identity.encHistory || [])].filter(Boolean);
   return _openSealedBody(sealed, aad, candidates, identity.id);
 }
 
@@ -348,11 +350,21 @@ async function _openSealedBody(sealed, aad, candidates, id) {
 // Forward secrecy by epoch: prune RETIRED enc keys whose epoch ended BEFORE `before`.
 //
 // encHistory[i] is the enc keypair that was RETIRED at rotations[i].created_at (same
-// index). Given a cutoff `before`, this drops every encHistory[i] whose rotation is
-// strictly older than the cutoff, and returns a NEW identity (the original is never
-// mutated). The current enc key (identity.enc) is ALWAYS kept, as are encHistory
-// entries retired at or after `before`. The rotations chain itself is untouched — it
-// is the signed root of trust; only the private enc material is dropped.
+// index). Given a cutoff `before`, this TOMBSTONES every encHistory[i] whose rotation
+// is strictly older than the cutoff: the entry is replaced with null (NOT removed), so
+// encHistory stays length-aligned with rotations. Compacting (dropping entries) would
+// break the encHistory[i] <-> rotations[i] invariant after the first prune, so a second
+// prune would compare each surviving entry against the WRONG (older) rotation date and
+// over-prune — silently destroying keys that should be kept and leaving messages
+// permanently unreadable. Tombstones keep the index stable, so repeated prunes are
+// idempotent and compare against the correct rotations[i] every time.
+//
+// Returns a NEW identity (the original is never mutated). The current enc key
+// (identity.enc) is ALWAYS kept, as are encHistory entries retired at or after `before`
+// (including entries already tombstoned by a prior prune — null stays null). The
+// rotations chain itself is untouched — it is the signed root of trust; only the
+// private enc material is dropped. Consumers of encHistory MUST tolerate null entries
+// (openMessage filters falsy candidates).
 //
 // TRADE-OFF (forward secrecy): after pruning, messages sealed to those retired keys
 // CAN NO LONGER BE OPENED by this identity. That is the point — you trade historical
@@ -366,18 +378,20 @@ export function pruneEncKeys(identity, { before } = {}) {
   }
   const rotations = identity.rotations || [];
   const history = identity.encHistory || [];
-  const kept = [];
+  // Tombstone in place: same length as `history`, null where pruned, original entry
+  // (possibly already null from a prior prune) where kept. Index alignment with
+  // rotations is preserved, so a later prune compares each slot against rotations[i].
+  const next = new Array(history.length);
   for (let i = 0; i < history.length; i++) {
     const r = rotations[i];
-    // Discard only when a matching rotation exists AND it retired this key strictly
+    // Prune only when a matching rotation exists AND it retired this key strictly
     // before the cutoff. An unmatched entry (impossible in normal use — encHistory and
     // rotations grow in lockstep) or an unparseable rotation date is KEPT, so we never
     // drop a key we cannot confidently date.
     const retiredAt = r ? Date.parse(r.created_at) : NaN;
-    const discard = r != null && retiredAt < cutoff;
-    if (!discard) kept.push(history[i]);
+    next[i] = r != null && retiredAt < cutoff ? null : history[i];
   }
-  return { ...identity, encHistory: kept };
+  return { ...identity, encHistory: next };
 }
 
 // The validity window of every sign key the identity has used:
