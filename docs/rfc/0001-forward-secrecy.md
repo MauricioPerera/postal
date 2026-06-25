@@ -1,6 +1,9 @@
 # RFC 0001 — Forward secrecy (issue #21)
 
-Status: **DRAFT — needs owner decision**. No code yet.
+Status: **ACCEPTED — implemented**. Owner chose Option C (epoch keys); shipped in
+PR #27 as `pruneEncKeys` (`src/postal.js`, `test/forward-secrecy.test.mjs`). Known
+follow-up: repeated prunes can over-drop history — always fail-safe (never retains a
+key it should drop).
 
 ## Problem
 Sealing uses ephemeral-static ECDH: the sender makes a fresh ephemeral key per

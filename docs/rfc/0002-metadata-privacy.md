@@ -1,6 +1,9 @@
 # RFC 0002 — Metadata privacy / social graph (issue #22)
 
-Status: **DRAFT — needs owner decision**. No code yet.
+Status: **ACCEPTED — implemented**. Owner chose A+B; shipped in PR #28
+(`buildEvent` seals anonymously by default + omittable `to`; `openMessage` opens
+both formats). Sender anonymity (C) remains a non-goal. Reminder: full social-graph
+privacy still requires a private/access-controlled repo.
 
 ## Problem
 Postal encrypts message **content** but not **metadata**. In cleartext:
