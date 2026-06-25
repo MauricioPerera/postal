@@ -7,7 +7,8 @@
 // + signature + append-only, checked at read-time AND in CI.
 
 import {
-  canonical, fingerprintId, humanFingerprint, sha256, utf8Bytes,
+  canonical, fingerprintId, humanFingerprint, sha256, utf8Bytes, utf8Text,
+  bytesToBase64, base64ToBytes,
   generateSignKeypair, generateEncKeypair,
   importSignPublic, importSignPrivate, sign, verify,
   sealForRecipients, openSealed,
@@ -228,7 +229,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
 
 async function sealEnvelope(text, recipients, aad) {
   const sealed = await sealForRecipients(String(text || ""), recipients, aad);
-  return btoa(unescape(encodeURIComponent(JSON.stringify(sealed))));
+  return bytesToBase64(utf8Bytes(JSON.stringify(sealed)));
 }
 
 // The canonical signed payload: everything EXCEPT the signature and the
@@ -294,7 +295,7 @@ export async function openMessage(ev, identity) {
   if (ev.kind !== "message" || !ev.body || !ev.body.sealed) return null;
   const raw = String(ev.body.sealed);
   if (raw.indexOf(MARKER) !== 0) return null;
-  const sealed = JSON.parse(decodeURIComponent(escape(atob(raw.slice(MARKER.length)))));
+  const sealed = JSON.parse(utf8Text(base64ToBytes(raw.slice(MARKER.length))));
   const aad = canonical({ chat_id: ev.chat_id, from: ev.from, to: ev.to, id: ev.id, created_at: ev.created_at });
   // Try the current enc key, then any rotated-out enc keys (old sealed messages
   // were wrapped to a previous enc key).
