@@ -312,6 +312,41 @@ export async function openMessage(ev, identity) {
   throw lastErr || new Error("cannot open");
 }
 
+// Forward secrecy by epoch: prune RETIRED enc keys whose epoch ended BEFORE `before`.
+//
+// encHistory[i] is the enc keypair that was RETIRED at rotations[i].created_at (same
+// index). Given a cutoff `before`, this drops every encHistory[i] whose rotation is
+// strictly older than the cutoff, and returns a NEW identity (the original is never
+// mutated). The current enc key (identity.enc) is ALWAYS kept, as are encHistory
+// entries retired at or after `before`. The rotations chain itself is untouched — it
+// is the signed root of trust; only the private enc material is dropped.
+//
+// TRADE-OFF (forward secrecy): after pruning, messages sealed to those retired keys
+// CAN NO LONGER BE OPENED by this identity. That is the point — you trade historical
+// readability for the guarantee that a future theft of the current key material does
+// NOT expose messages from already-pruned epochs. If `before` is missing or not a
+// parseable date, this throws (never silently drop everything).
+export function pruneEncKeys(identity, { before } = {}) {
+  const cutoff = Date.parse(before);
+  if (before == null || Number.isNaN(cutoff)) {
+    throw new Error("pruneEncKeys: `before` must be a valid ISO date string");
+  }
+  const rotations = identity.rotations || [];
+  const history = identity.encHistory || [];
+  const kept = [];
+  for (let i = 0; i < history.length; i++) {
+    const r = rotations[i];
+    // Discard only when a matching rotation exists AND it retired this key strictly
+    // before the cutoff. An unmatched entry (impossible in normal use — encHistory and
+    // rotations grow in lockstep) or an unparseable rotation date is KEPT, so we never
+    // drop a key we cannot confidently date.
+    const retiredAt = r ? Date.parse(r.created_at) : NaN;
+    const discard = r != null && retiredAt < cutoff;
+    if (!discard) kept.push(history[i]);
+  }
+  return { ...identity, encHistory: kept };
+}
+
 // The validity window of every sign key the identity has used:
 //   from   : key became active (null for genesis = no lower bound)
 //   until  : key was rotated out (null for the current key = no upper bound)
