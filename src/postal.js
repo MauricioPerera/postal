@@ -171,7 +171,11 @@ export async function verifyChatMeta(meta, { directory, chatId } = {}) {
   if (reasons.length) return { ok: false, reasons };
 
   R(chatId && meta.id !== chatId, "meta-id-mismatch");
-  R(!String(meta.id).includes(meta.created_by), "chat-id-not-bound-to-creator");
+  // The chat id must be canonically bound to its creator: a substring match would
+  // let `c_X_<rnd>` pass for an id that merely mentions X (e.g. `c_Y_XZ_1`), opening
+  // a forgery where a meta is swapped onto someone else's chat. Require the exact
+  // `c_<created_by>_` prefix that newChatId produces.
+  R(!String(meta.id).startsWith("c_" + meta.created_by + "_"), "chat-id-not-bound-to-creator");
 
   const creator = directory && directory[meta.created_by];
   if (!creator) {
@@ -439,6 +443,34 @@ function _checkEnvelopeShape(ev) {
   return reasons;
 }
 
+// 1c. field formats: the schema is NOT enforced at runtime, so the gate must reject
+//     `from`/`chat_id` shapes that would poison eventPath (path traversal via '/' or
+//     '..'). `from` is a 16-hex-char identity fingerprint; `chat_id` is the newChatId
+//     form `c_<from>_<rnd>` or an app id, restricted to path-safe chars.
+function _isBadFromFormat(e) { return e && !/^[0-9A-F]{16}$/.test(e.from); }
+function _isBadChatIdFormat(e) { return e && !/^[A-Za-z0-9_-]+$/.test(e.chat_id); }
+function _checkFieldFormats(ev) {
+  const reasons = [];
+  if (_isBadFromFormat(ev)) reasons.push("bad-from-format");
+  if (_isBadChatIdFormat(ev)) reasons.push("bad-chat-id-format");
+  return reasons;
+}
+
+// 2. id determinism + safe suffix. The id is `${created_at}:${from}:${rnd}` with
+//    [:.]->-; the prefix must encode created_at+from (non-deterministic-id otherwise),
+//    AND the free suffix must be non-empty path-safe [A-Za-z0-9-] so an adversary
+//    cannot smuggle '/' or '..' into the id (which eventPath would splice into a path).
+function _idPrefix(ev) {
+  return ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
+}
+function _checkIdFormat(ev) {
+  const prefix = _idPrefix(ev);
+  if (ev.id.indexOf(prefix) !== 0) return ["non-deterministic-id"];
+  const suffix = ev.id.slice(prefix.length);
+  return suffix && /^[A-Za-z0-9-]+$/.test(suffix) ? [] : ["bad-id-format"];
+}
+
+
 // 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
 //     open kinds stay free-form. The attest validator is the canonical one from
 //     trust.js (single source of truth) — a malformed attest is rejected HERE,
@@ -550,9 +582,11 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   if (body.halt) return { ok: false, reasons: body.reasons };
   reasons.push(...body.reasons);
 
-  // 2. path determinism: id must encode created_at + from
-  const expectIdPrefix = ev.created_at.replace(/[:.]/g, "-") + "_" + ev.from + "_";
-  R(ev.id.indexOf(expectIdPrefix) !== 0, "non-deterministic-id");
+  // 1c. field formats (from / chat_id) — runtime shape the schema does not enforce.
+  reasons.push(..._checkFieldFormats(ev));
+
+  // 2. path determinism: id must encode created_at + from, with a path-safe suffix.
+  reasons.push(..._checkIdFormat(ev));
 
   // 3. signature valid against ANY of the author's keys (current or rotated-out),
   //    so events signed before a key rotation remain verifiable.
