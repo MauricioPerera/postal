@@ -8,8 +8,19 @@ import {
   chatMetaPath, verifyChatMeta, verifyChat,
 } from "./postal.js";
 import { canonicalOrder } from "./order.js";
+import { ghCommitIndex, attachCommitIndex } from "./commit-order.js";
 
 export { ghClient };
+
+// Defensive commit-index source for the HOSTED live transport (no local git). Returns a
+// path -> commitIndex Map when `client` exposes the GitHub commits API (getHeadSha /
+// commitsSince / getCommitFiles), or an EMPTY Map otherwise (in-memory test clients, or any
+// failure) so canonicalOrder falls back to created_at — the historical behavior, untouched.
+async function _commitIndexFor(client) {
+  const hasCommitApi = client && ["getHeadSha", "commitsSince", "getCommitFiles"].every((m) => typeof client[m] === "function");
+  if (!hasCommitApi) return new Map();
+  try { return await ghCommitIndex(client); } catch { return new Map(); }
+}
 
 // Publish your self-signed public identity to .postal/users/<id>.json.
 export async function publishIdentity(client, identity) {
@@ -94,6 +105,10 @@ export async function pollChat(client, identity, chat_id, { directory, members }
     items.push({ path, event: ev });
   }
 
+  // Anchor the canonical order to the COMMIT history (operator-anchored, not backdatable) when
+  // the client exposes it; otherwise an empty Map -> canonicalOrder falls back to created_at.
+  const commitIndex = await _commitIndexFor(client);
+
   // Load + verify the chat meta. The genesis owner and governance come ONLY from a
   // meta that passes verifyChatMeta; a chat without a valid meta is untrusted.
   let meta = null;
@@ -108,14 +123,14 @@ export async function pollChat(client, identity, chat_id, { directory, members }
     // with 'chat-meta-invalid' (plus the meta's own reasons); preserve the
     // non-parseable ones as 'unparseable'. No input mutation, canonical order kept.
     const reasons = ["chat-meta-invalid", ...metaVerdict.reasons];
-    const parseable = items.map((it) => ({ path: it.path, event: it.event, verdict: { ok: false, reasons } }));
+    const parseable = attachCommitIndex(items, commitIndex).map((it) => ({ path: it.path, event: it.event, commitIndex: it.commitIndex, verdict: { ok: false, reasons } }));
     return [...canonicalOrder(parseable), ...unparseable];
   }
 
   // Trusted chat: run the FULL gate over all events at once. verifyChat derives
   // membership from member events (genesis owner seeded from the meta) and
   // returns per-path verdicts plus cross-author hash-chain failures.
-  const res = await verifyChat(items, { directory, genesisOwner: meta.created_by, governance: meta.governance, chatId: chat_id });
+  const res = await verifyChat(attachCommitIndex(items, commitIndex), { directory, genesisOwner: meta.created_by, governance: meta.governance, chatId: chat_id });
 
   // Build path -> verdict from res.results, then fold in res.failures: a failure
   // only OVERWRITES a verdict if that path isn't already ok=false (verifyChat's own
@@ -135,7 +150,7 @@ export async function pollChat(client, identity, chat_id, { directory, members }
     if (verdict.ok && it.event.kind === "message") {
       try { text = await openMessage(it.event, identity); } catch { text = null; } // not a recipient
     }
-    out.push({ path: it.path, event: it.event, verdict, text });
+    out.push({ path: it.path, event: it.event, verdict, text, commitIndex: commitIndex.get(it.path) });
   }
 
   // Canonical order on the parseable items; non-parseable re-appended at the end in
