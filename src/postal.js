@@ -471,6 +471,68 @@ function _checkIdFormat(ev) {
 }
 
 
+// 1d. additionalProperties at runtime. The schema declares additionalProperties:
+//     false but does NOT enforce it at runtime (it is only a drift-guard for tests).
+//     Reject any top-level field outside the allowed envelope. NOTE: the allowed set
+//     is a SUPERSET of schema properties — it includes `attestations` (carried by
+//     member events, stripped out of signedView before signing) which the schema
+//     historically omitted. Enforcing the schema literally would reject valid
+//     member events; the list below is the real envelope.
+const _ALLOWED_EVENT_FIELDS = new Set([
+  "v", "kind", "seq", "prev", "supersedes", "chat_id", "from", "to",
+  "created_at", "id", "body", "sig", "attestations",
+]);
+function _checkUnknownFields(ev) {
+  for (const k of Object.keys(ev)) if (!_ALLOWED_EVENT_FIELDS.has(k)) return ["unknown-field"];
+  return [];
+}
+
+// 1e. body: required, plain object (not array, not null). The schema-lite envelope
+//     check does not cover body, so a missing/non-object body is rejected here.
+function _checkBodyShape(ev) {
+  const b = ev.body;
+  if (typeof b !== "object" || b === null || Array.isArray(b)) return ["bad-body"];
+  return [];
+}
+
+// 1f. `to` items must all be strings. The envelope check only ensures `to` is an
+//     array; a non-string item would poison downstream consumers.
+function _checkToItems(ev) {
+  if (!Array.isArray(ev.to)) return [];
+  for (const r of ev.to) if (typeof r !== "string") return ["bad-to-item"];
+  return [];
+}
+
+// 1g. optional chain fields: when present, must match their declared types.
+function _checkOptionalTypes(ev) {
+  const reasons = [];
+  if ("seq" in ev && (typeof ev.seq !== "number" || !Number.isInteger(ev.seq) || ev.seq < 0)) reasons.push("bad-seq");
+  if ("prev" in ev && ev.prev !== null && typeof ev.prev !== "string") reasons.push("bad-prev");
+  if ("supersedes" in ev && ev.supersedes !== null && typeof ev.supersedes !== "string") reasons.push("bad-supersedes");
+  return reasons;
+}
+
+// 1h. message body must carry a `sealed` string starting with POSTAL1:. Today this
+//     is only checked at open-time; the gate must reject an unsealed message early.
+function _checkMessageBody(ev) {
+  if (ev.kind !== "message") return [];
+  const sealed = ev.body && ev.body.sealed;
+  if (typeof sealed !== "string" || sealed.indexOf(MARKER) !== 0) return ["bad-message-body"];
+  return [];
+}
+
+// Orchestrator for the runtime schema extras (1d-1h). Thin: each rule lives in its
+// own helper so the per-rule complexity stays low; this just concatenates results.
+function _checkStructuralExtras(ev) {
+  let reasons = [];
+  reasons.push(..._checkUnknownFields(ev));
+  reasons.push(..._checkBodyShape(ev));
+  reasons.push(..._checkToItems(ev));
+  reasons.push(..._checkOptionalTypes(ev));
+  reasons.push(..._checkMessageBody(ev));
+  return reasons;
+}
+
 // 1b. body shape per kind (fail-closed). Reserved kinds carry required fields;
 //     open kinds stay free-form. The attest validator is the canonical one from
 //     trust.js (single source of truth) — a malformed attest is rejected HERE,
@@ -581,6 +643,10 @@ export async function verifyEvent(ev, { directory, seenPaths, members, governanc
   const body = _checkKindBody(ev);
   if (body.halt) return { ok: false, reasons: body.reasons };
   reasons.push(...body.reasons);
+
+  // 1d-1h. runtime schema enforcement (additionalProperties, body shape, to items,
+  // optional chain types, message sealed body) — the schema is NOT loaded at runtime.
+  reasons.push(..._checkStructuralExtras(ev));
 
   // 1c. field formats (from / chat_id) — runtime shape the schema does not enforce.
   reasons.push(..._checkFieldFormats(ev));
