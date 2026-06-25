@@ -12,6 +12,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { verifyIdentityDoc, verifyChat, verifyChatMeta } from "./postal.js";
+import { readLocalCommitIndex, attachCommitIndex } from "./commit-order.js";
 
 function walk(dir) {
   if (!existsSync(dir)) return [];
@@ -46,6 +47,12 @@ export async function verifyRepo(repoRoot) {
     ? readdirSync(chatsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
     : [];
 
+  // Anchor cross-author order to commit order (the one thing the signer doesn't
+  // control) instead of self-asserted created_at. Built once from the local git
+  // clone; an empty map (no git) leaves items unchanged -> canonicalOrder falls
+  // back to created_at, identical to the historical behavior.
+  const commitIndex = await readLocalCommitIndex(root);
+
   for (const chat of chats) {
     const meta = readJson(join(chatsDir, chat, "meta.json"));
     // Trust created_by / governance ONLY from a meta.json that passes verification.
@@ -68,7 +75,7 @@ export async function verifyRepo(repoRoot) {
       items.push({ path: rel, event });
     }
 
-    const chatResult = await verifyChat(items, { directory, genesisOwner, governance, chatId: chat });
+    const chatResult = await verifyChat(attachCommitIndex(items, commitIndex), { directory, genesisOwner, governance, chatId: chat });
     for (const f of chatResult.failures) failures.push(f);
   }
 
