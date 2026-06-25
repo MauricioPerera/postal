@@ -12,6 +12,7 @@ import {
   generateSignKeypair, generateEncKeypair,
   importSignPublic, importSignPrivate, sign, verify,
   sealForRecipients, openSealed,
+  sealAnonymous, openAnonymous,
 } from "./crypto.js";
 import { canonicalOrder } from "./order.js";
 import { validateAttestation } from "./trust.js";
@@ -207,7 +208,14 @@ function makeEventId(createdAt, from, rnd) {
 // and prev is the hash of that author's previous event. Both are signed, so order and
 // continuity no longer depend on the spoofable created_at, and deleting a middle event
 // breaks the successor's prev link.
-export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients, seq, prev, supersedes }) {
+// `seal` selects the message-sealing mode (default "anon"):
+//   "anon"    -> sealAnonymous: unlabeled wrap array + decoys + size padding. The
+//                envelope names no recipient, so `to` may be omitted (carried as [])
+//                to avoid leaking the social graph. The DEFAULT.
+//   "labeled" -> sealForRecipients: per-recipient keyed wraps (legacy directed form),
+//                useful when a sender wants to name recipients. Requires `recipients`
+//                with stable ids matching `to`.
+export async function buildEvent(identity, { kind, chat_id, to = [], created_at, rnd, body, recipients, seq, prev, supersedes, seal = "anon" }) {
   const ev = {
     v: VERSION,
     kind,
@@ -223,7 +231,7 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
 
   if (kind === "message") {
     const aad = canonical({ chat_id, from: ev.from, to: ev.to, id: ev.id, created_at });
-    ev.body = { sealed: MARKER + (await sealEnvelope(body.text, recipients, aad)) };
+    ev.body = { sealed: MARKER + (await sealEnvelope(body.text, recipients, aad, seal)) };
   }
 
   const priv = await importSignPrivate(identity.sign.privateJwk);
@@ -231,8 +239,15 @@ export async function buildEvent(identity, { kind, chat_id, to = [], created_at,
   return ev;
 }
 
-async function sealEnvelope(text, recipients, aad) {
-  const sealed = await sealForRecipients(String(text || ""), recipients, aad);
+// Seal the message body. Branches on `seal`: "labeled" keeps the legacy per-recipient
+// keyed envelope (sealForRecipients); anything else (incl. the default "anon") uses the
+// anonymous envelope (sealAnonymous) over the recipient public keys — no ids, no `to`
+// requirement. Both forms are opened by openMessage via the alg discriminator.
+async function sealEnvelope(text, recipients, aad, seal) {
+  const list = Array.isArray(recipients) ? recipients : [];
+  const sealed = seal === "labeled"
+    ? await sealForRecipients(String(text || ""), list, aad)
+    : await sealAnonymous(String(text || ""), list.map((r) => r.encPublicKey), aad);
   return bytesToBase64(utf8Bytes(JSON.stringify(sealed)));
 }
 
@@ -295,6 +310,8 @@ async function verifyChains(items) {
 }
 
 // Open a message event as `identity` (decrypt the sealed body).
+// Supports BOTH envelope formats: anonymous (alg ends in "/anon") and the legacy
+// labeled form. The branch is driven by sealed.alg so old labeled messages still open.
 export async function openMessage(ev, identity) {
   if (ev.kind !== "message" || !ev.body || !ev.body.sealed) return null;
   const raw = String(ev.body.sealed);
@@ -304,9 +321,25 @@ export async function openMessage(ev, identity) {
   // Try the current enc key, then any rotated-out enc keys (old sealed messages
   // were wrapped to a previous enc key).
   const candidates = [identity.enc, ...(identity.encHistory || [])];
+  return _openSealedBody(sealed, aad, candidates, identity.id);
+}
+
+// Open a parsed sealed envelope across candidate enc keys. Branches on alg:
+//   "/anon"  -> openAnonymous (no recipient id; trial-unwrap each slot per candidate)
+//   otherwise-> openSealed (legacy labeled; needs the recipient `id`)
+// Returns the first plaintext that opens; throws the last error (or "cannot open")
+// if no candidate opens — matching the historical openMessage contract.
+async function _openSealedBody(sealed, aad, candidates, id) {
+  if (String(sealed.alg || "").includes("/anon")) {
+    for (const c of candidates) {
+      try { return await openAnonymous(sealed, c.privateJwk, aad); }
+      catch { /* not this candidate's key/slot; try the next */ }
+    }
+    throw new Error("cannot open");
+  }
   let lastErr;
-  for (const e of candidates) {
-    try { return await openSealed(sealed, identity.id, e.privateJwk, aad); }
+  for (const c of candidates) {
+    try { return await openSealed(sealed, id, c.privateJwk, aad); }
     catch (err) { lastErr = err; }
   }
   throw lastErr || new Error("cannot open");
